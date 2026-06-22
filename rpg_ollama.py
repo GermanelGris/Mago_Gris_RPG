@@ -2273,8 +2273,10 @@ PERSONA_NEGRO = ("Eres el Mago Negro, temido por todos como el tirano de los Dos
 
 
 def claude_char(name, persona):
-    """Personaje (Blanco/Negro) hablado por Claude con una persona a medida."""
-    return {"name": name, "ai": CLAUDE, "persona": persona, "elem": "neutro", "lvl": 1}
+    """Personaje (Blanco/Negro) hablado por el modelo elegido para cada uno."""
+    ai = BLANCO_AI if "Blanco" in name else NEGRO_AI
+    return {"name": name, "ai": ai or CLAUDE, "persona": persona,
+            "elem": "neutro", "lvl": 1}
 
 # Comentarios reactivos por evento y elemento. El MUNDO (etapas/mapas/eventos)
 # es predefinido = 0 tokens; estas son las REACCIONES "en vivo" de cada maga IA.
@@ -2365,7 +2367,9 @@ def ollama_installed_models():
     try:
         with urllib.request.urlopen(base + "/api/tags", timeout=4) as r:
             data = json.loads(r.read().decode("utf-8"))
-        return [m["name"] for m in data.get("models", []) if m.get("name")]
+        # excluye modelos de EMBEDDINGS (no sirven para chatear)
+        return [m["name"] for m in data.get("models", [])
+                if m.get("name") and "embed" not in m["name"].lower()]
     except Exception:
         return []
 
@@ -2383,6 +2387,10 @@ if _INSTALLED:
     print(f"[Ollama] {len(_INSTALLED)} modelos detectados:", ", ".join(_INSTALLED))
 else:
     print("[Ollama] no se detectaron modelos (¿'ollama serve' activo?); uso los por defecto.")
+
+# Modelos que dan voz al Mago Blanco y al Mago Negro (elegibles en la pantalla de IAs).
+BLANCO_AI = CLAUDE
+NEGRO_AI = CLAUDE
 
 
 def ask_companion_llm(companion, prompt, context=""):
@@ -2482,9 +2490,14 @@ class Chat:
 def ai_assign_screen():
     """El usuario ELIGE qué IA controla a cada una de las 6 magas (por elemento).
     Devuelve dict elem -> avatar IA. Claude se reserva para Blanco y Negro."""
+    global BLANCO_AI, NEGRO_AI
+    # Filas: las 6 magas + Mago Blanco + Mago Negro. (label, elem, es_personaje)
+    rows = [(f"Maga de {ELEM_NAME[h['elem']]} ({h['name']})", h["elem"], False)
+            for h in HEROES]
+    rows.append(("Mago Blanco", "luz", True))
+    rows.append(("Mago Negro", "sombra", True))
     row = 0
-    # default: reparte los modelos disponibles entre las magas (seguro si hay pocos)
-    ai_idx = [i % len(AIS) for i in range(len(HEROES))]
+    ai_idx = [i % len(AIS) for i in range(len(rows))]
     while True:
         clock.tick(FPS)
         poll_stick()
@@ -2499,44 +2512,46 @@ def ai_assign_screen():
                 dn = e.key in (pygame.K_DOWN, pygame.K_s)
                 lf = e.key in (pygame.K_LEFT, pygame.K_a)
                 rt = e.key in (pygame.K_RIGHT, pygame.K_d)
-                ok = e.key in (pygame.K_RETURN, pygame.K_e)
+                ok = e.key in (pygame.K_RETURN, pygame.K_SPACE)
             if e.type == pygame.JOYHATMOTION:
                 hx, hy = e.value
                 up = hy == 1; dn = hy == -1; lf = hx == -1; rt = hx == 1
-            if e.type == pygame.JOYBUTTONDOWN and e.button in (0, 7):
-                ok = True
+            if e.type == pygame.JOYBUTTONDOWN and e.button == 7:
+                ok = True                        # Start = empezar
             if e.type == pygame.JOYBUTTONDOWN and e.button == 1:
                 return None                      # B = cancelar
             if up:
-                row = (row - 1) % len(HEROES)
+                row = (row - 1) % len(rows)
             if dn:
-                row = (row + 1) % len(HEROES)
+                row = (row + 1) % len(rows)
             if lf:
                 ai_idx[row] = (ai_idx[row] - 1) % len(AIS)
             if rt:
                 ai_idx[row] = (ai_idx[row] + 1) % len(AIS)
             if ok:
+                BLANCO_AI = AIS[ai_idx[len(HEROES)]]
+                NEGRO_AI = AIS[ai_idx[len(HEROES) + 1]]
                 return {HEROES[i]["elem"]: AIS[ai_idx[i]]
                         for i in range(len(HEROES))}
         screen.fill(BLACK)
-        draw_text(screen, "¿Qué IA vive cada maga?", 26, 14, font_lg, GOLD)
-        draw_text(screen, "↑/↓ maga | ←/→ IA | A/Start empezar (o ENTER)",
-                  26, 44, font_xs, DIM)
-        for i, h in enumerate(HEROES):
+        draw_text(screen, "Elige el MODELO de cada personaje", 24, 8, font_lg, GOLD)
+        draw_text(screen, "Up/Down personaje | Left/Right modelo | ENTER/Start empezar",
+                  24, 38, font_xs, DIM)
+        rowh = 50
+        for i, (label, el, _p) in enumerate(rows):
             ai = AIS[ai_idx[i]]
-            y = 72 + i * 64
-            box = pygame.Rect(26, y, W - 52, 58)
+            y = 62 + i * rowh
+            box = pygame.Rect(20, y, W - 40, rowh - 6)
             pygame.draw.rect(screen, (40, 50, 78) if i == row else (24, 26, 38),
-                             box, border_radius=8)
-            pygame.draw.rect(screen, ELEM_COLOR[h["elem"]], box, 3, border_radius=8)
-            pygame.draw.circle(screen, ELEM_COLOR[h["elem"]], (box.x + 30, box.y + 29), 18)
-            pygame.draw.circle(screen, WHITE, (box.x + 30, box.y + 29), 18, 2)
-            draw_text(screen, f"Maga de {ELEM_NAME[h['elem']]} ({h['name']})",
-                      box.x + 60, box.y + 8, font_md, WHITE)
-            draw_text(screen, "IA:", box.x + 60, box.y + 32, font_xs, DIM)
-            pygame.draw.circle(screen, ai["color"], (box.x + 92, box.y + 38), 7)
-            draw_text(screen, f"◄ {ai['name']} ►", box.x + 106, box.y + 30,
-                      font_md, ai["color"])
+                             box, border_radius=7)
+            pygame.draw.rect(screen, ELEM_COLOR.get(el, GRAY), box, 2, border_radius=7)
+            pygame.draw.circle(screen, ELEM_COLOR.get(el, GRAY),
+                               (box.x + 22, box.y + 22), 13)
+            pygame.draw.circle(screen, WHITE, (box.x + 22, box.y + 22), 13, 2)
+            draw_text(screen, label, box.x + 44, box.y + 4, font_sm, WHITE)
+            pygame.draw.circle(screen, ai["color"], (box.x + 50, box.y + 30), 6)
+            draw_text(screen, f"◄ {ai['name']} ►  ({ai_idx[i] + 1}/{len(AIS)})",
+                      box.x + 62, box.y + 24, font_sm, ai["color"])
         present()
 
 
@@ -3148,6 +3163,11 @@ def play_game(slot, saved):
     RT.clear(); HOUSES.clear()                 # estado de mundo FRESCO por partida
     if saved:                                  # CONTINUAR partida (checkpoint)
         AI_OF = {el: _ai_by_name(nm) for el, nm in saved["ai_of"].items()}
+        global BLANCO_AI, NEGRO_AI             # restaura modelos de Blanco/Negro
+        if saved.get("blanco_ai"):
+            BLANCO_AI = _ai_by_name(saved["blanco_ai"])
+        if saved.get("negro_ai"):
+            NEGRO_AI = _ai_by_name(saved["negro_ai"])
         gris = saved["gris"]
         roster = saved["roster"]
         for c in roster:
@@ -3332,6 +3352,7 @@ def play_game(slot, saved):
         return {
             "gris": gris, "roster": roster, "active": active,
             "ai_of": {el: AI_OF[el]["name"] for el in AI_OF},
+            "blanco_ai": BLANCO_AI["name"], "negro_ai": NEGRO_AI["name"],
             "owned": {k: list(v) for k, v in owned.items()},
             "owned_wear": list(owned_wear), "equipped": equipped,
             "houses_claimed": list(houses_claimed),
