@@ -86,7 +86,7 @@ El mando se puede **conectar/desconectar en caliente**.
   planta▸agua/rayo · tierra▸fuego/rayo · rayo▸agua/hielo · hielo▸planta/tierra.
 - Combate por turnos: **Atacar, Poderes, Combos, Bolsa, Cubrirse, Huir**.
 - Tras liberar 3 magas aparece el **Mago Negro** en el hall (puedes hablarle o
-  enfrentarlo). El verdadero villano es el **Mago Blanco**. Hay **varios finales**
+  enfrentarlo). Hay **varios finales**
   según tus decisiones.
 
 ---
