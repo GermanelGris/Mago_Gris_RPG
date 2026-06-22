@@ -1,0 +1,2 @@
+# Dependencias del juego Nerea RPG (autonomo). Solo necesita pygame.
+pygame>=2.6
