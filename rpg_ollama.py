@@ -11,6 +11,7 @@ GAME_META = {
 import pygame
 import sys
 import os
+import math
 import random
 import re
 import threading
@@ -268,10 +269,12 @@ WHITE_MAGE = {"id": "blanco", "name": "Mago Blanco", "elem": "luz", "hp": 90, "m
               "atk": 17, "df": 13, "spd": 12, "pre": 95, "agu": 18,
               "powers": [("Rayo Sagrado", 7, 32), ("Bendición", 8, -55),
                          ("Juicio Divino", 15, 54)]}
-BLACK_MAGE = {"id": "negro", "name": "Mago Negro", "elem": "sombra", "hp": 96, "mp": 40,
+BLACK_MAGE = {"id": "negro", "name": "Mago Negro", "elem": "sombra", "hp": 96, "mp": 60,
               "atk": 19, "df": 12, "spd": 10, "pre": 90, "agu": 22,
               "powers": [("Garra Umbría", 7, 34), ("Drenar Alma", 8, 30),
-                         ("Eclipse", 16, 56)]}
+                         ("Lanza Sombría", 10, 42), ("Maldición", 12, 48),
+                         ("Velo de Sombra", 6, 0), ("Festín Oscuro", 14, -60),
+                         ("Eclipse", 16, 56), ("Abismo Final", 22, 78)]}
 
 # Combos (Dual/Triple). Se ofrecen si TODOS sus miembros están en el equipo,
 # vivos y con MP. Dañan a todos los enemigos. 'elem' define su efectividad.
@@ -622,9 +625,14 @@ WORLD_THEME = {"fuego": "volcan", "planta": "bosque", "agua": "mar",
 WORLD_NAME = {"fuego": "Caldera Ardiente", "planta": "Bosque Esmeralda",
               "agua": "Abismo Marino", "tierra": "Cañón de Arena",
               "rayo": "Cima de la Tormenta", "hielo": "Pico Helado"}
-WORLD_DECOR = {"fuego": [(1, 0.05)], "planta": [(2, 0.10), (3, 0.04)],
-               "agua": [(3, 0.12)], "tierra": [(1, 0.08)],
-               "rayo": [(1, 0.04)], "hielo": [(3, 0.08), (1, 0.03)]}
+# Decoración por mundo: (kind, densidad). kind 2=árbol(1x2), 3=poza pequeña(1x1),
+# 5=poza grande(2x2), 6=obstáculo temático 1x1 (magma/roca/cristal/hielo según mundo).
+WORLD_DECOR = {"fuego": [(6, 0.05)],
+               "planta": [(2, 0.05), (5, 0.015), (3, 0.03)],
+               "agua": [(5, 0.04), (3, 0.05)],
+               "tierra": [(6, 0.08)],
+               "rayo": [(6, 0.04)],
+               "hielo": [(3, 0.08), (6, 0.03)]}
 
 # Enemigos de AMBIENTE por mundo (criaturas, no magos). Mismo elemento del mundo.
 AMBIENT = {
@@ -694,52 +702,63 @@ REIGN = {
 }
 
 # El Gran Orden mundial de los Dos Triángulos (▲ blanco arriba, ▼ negro abajo).
+# Lore COMÚN: culpa al Mago Negro y confía en el Blanco (sin destripar el final).
 ORDER_LORE = [
-    "Todo lo rige el Gran Orden de los Dos Triángulos: el negro abajo, "
-    "sosteniendo el peso; el blanco arriba, recibiendo la gloria. Pagamos "
-    "tributo al de abajo... pero las órdenes, juro, bajan desde arriba.",
-    "El Mago Negro firma cada decreto del Orden y carga con cada odio. "
-    "La luz solo observa desde su trono. ¿No te parece demasiado cómodo, viajero?",
-    "Nací bajo el Orden de los Dos Triángulos y moriré bajo él, salvo que "
-    "alguien rompa el sello. Dicen que hace falta un mago sin color... uno gris.",
+    "El Gran Orden de los Dos Triángulos lo regía todo en paz... hasta que el "
+    "Mago Negro manchó de sombra el triángulo de abajo y nos sometió a todos.",
+    "Pagamos tributo al Orden y rezamos por que la luz del Mago Blanco nos "
+    "devuelva lo que el Mago Negro nos arrebató.",
+    "Dicen que hace falta un mago sin color para romper el sello del Mago Negro. "
+    "Uno gris, como tú. Quizá la profecía hablaba de este día.",
 ]
 # Charla de NPCs (NO magas). Variada y ÚNICA por reino+etapa: vida cotidiana,
 # rumores, pistas y PRESAGIOS sobre el verdadero villano. Se reparten sin repetir.
 NPC_NAMES = ["Aldeano", "Aldeana", "Pastor", "Herrera", "Niño", "Anciana",
              "Viajera", "Tabernero", "Pescador", "Cazadora", "Bardo", "Costurera",
              "Molinero", "Curandera", "Vagabundo", "Centinela"]
+# Charla COMÚN (97%): vida cotidiana, gratitud, miedo al Mago Negro y CONFIANZA en
+# el Mago Blanco como salvador. NO acusan al Blanco (la verdad se guarda hasta el final).
 NPC_LINES = [
-    "Mi abuela decía que el color no es del que reina, sino del que ama la tierra.",
-    "¿Has notado que el Mago Blanco nunca se ensucia las manos en esta guerra?",
-    "Recé al triángulo de arriba toda mi vida. ¿Y si rezaba al amo equivocado?",
-    "Dicen que un mago sin color romperá el sello. Tú no tienes color, ¿verdad?",
-    "El Mago Negro da miedo, sí... pero el miedo es fácil de fabricar, viajero.",
-    "Vendí mi cosecha por monedas con dos triángulos. Pesan como una condena.",
-    "Cada noche oigo llorar a alguien tras la puerta del Orden. ¿Será el Mago Negro?",
-    "Mi hijo se alistó con la luz. Volvió hablando solo de obedecer.",
-    "Antes cantábamos al trabajar. El silencio llegó con los decretos, no con la sombra.",
-    "Un viajero gris... eso decían las viejas profecías. Mira por dónde.",
     "Si liberas a nuestra maga, te invito a la mejor sopa del reino.",
-    "No confíes en quien sonríe mientras otros cargan la culpa.",
-    "He visto al Blanco hablar a solas con sombras. Nadie me cree.",
-    "El Orden promete paz. Yo solo veo cadenas pintadas de blanco.",
-    "Mi padre forjó el trono de los Dos Triángulos. Murió arrepentido.",
-    "Dicen que las magas no se volvieron malas: se las pusieron así.",
-    "Cuídate del que reparte miedo y luego ofrece consuelo.",
-    "Cuando todo sea gris, quizá por fin seamos libres de los colores.",
-    "La luz que no calienta y solo deslumbra... ¿es luz o es trampa?",
-    "Yo planté un árbol el día que nació la maga. Aún resiste, como nosotros.",
-    "El tabernero jura que el Mago Blanco firma los decretos que el Mago Negro proclama.",
-    "Pequeño, no temas al gris: es el color de quien escucha a todos.",
-    "Hay quien prospera con esta guerra. Pregúntate quién, y tendrás tu villano.",
-    "Mis redes salen vacías desde la posesión. El mar también está preso.",
-    "Te di mi última vela para tu viaje. Devuélvenos la luz de verdad.",
-    "Dos triángulos, un mismo titiritero. Algún día lo entenderás.",
-    "Soñé con seis mujeres encadenadas y un hombre blanco riendo. Solo un sueño... ¿no?",
-    "El que nada pierde en una guerra suele ser quien la empezó.",
     "Gracias por pasar, gris. Hacía años que nadie nos miraba a los ojos.",
-    "Mi telar tejía banderas de colores. Ahora solo me piden blanco y negro.",
+    "Dicen que un mago sin color romperá el sello. Tú no tienes color, ¿verdad?",
+    "Un viajero gris... eso decían las viejas profecías. Mira por dónde.",
+    "Menos mal que el Mago Blanco vela por nosotros; su luz nos da esperanza.",
+    "Reza al triángulo de arriba, viajero, y el Mago Blanco guiará tus pasos.",
+    "El Mago Negro nos robó la sonrisa. Ojalá caiga pronto bajo tu mano.",
+    "Mis redes salen vacías desde la posesión. El mar también está preso.",
+    "Yo planté un árbol el día que nació la maga. Aún resiste, como nosotros.",
     "Si ves a la maga, dile que su pueblo la espera con la mesa puesta.",
+    "Pequeño, no temas al gris: es el color de quien escucha a todos.",
+    "Mi telar tejía banderas de colores. El Mago Negro solo me deja usar negro.",
+    "Te di mi última vela para tu viaje. Devuélvenos a nuestra maga, gris.",
+    "Cuando liberes a la maga, las cosechas volverán. No tardes, te lo ruego.",
+    "Las magas no se volvieron malas: el Mago Negro las cubrió de sombra.",
+    "Mi abuela decía que el color no es del que reina, sino del que ama la tierra.",
+    "Cuídate de los acólitos del Mago Negro: rondan los caminos al anochecer.",
+    "El Mago Blanco mandó víveres al refugio. Sin él ya habríamos caído.",
+    "Mi hijo se alistó con la luz del Mago Blanco. Estoy orgullosa de él.",
+    "Cuando todo vuelva a tener color haremos una fiesta. Estás invitado, gris.",
+    "Vi a tu maga reír en la plaza, antes. El Mago Negro le robó la voz.",
+    "Aquí rezamos por ti cada noche, mago gris. Eres nuestra esperanza.",
+    "El herrero forja espadas para la causa de la luz. Que el Blanco nos guarde.",
+    "No tengo gran cosa, pero toma pan para el camino. Libera a nuestra reina.",
+]
+# Charla de SOSPECHA (solo el 3% de los NPCs): los pocos que dudan del Mago Blanco.
+NPC_DOUBT = [
+    "¿Has notado que el Mago Blanco nunca se ensucia las manos en esta guerra?",
+    "He visto al Blanco hablar a solas con sombras. Nadie me cree.",
+    "El tabernero jura que el Mago Blanco firma los decretos que el Negro proclama.",
+    "No confíes en quien sonríe mientras otros cargan la culpa.",
+    "La luz que no calienta y solo deslumbra... ¿es luz o es trampa?",
+    "Dos triángulos, un mismo titiritero. Algún día lo entenderás.",
+    "Hay quien prospera con esta guerra. Pregúntate quién, y tendrás tu villano.",
+    "Soñé con seis mujeres encadenadas y un hombre blanco riendo. ¿Solo un sueño?",
+    "El que nada pierde en una guerra suele ser quien la empezó.",
+    "Cuídate del que reparte miedo y luego ofrece consuelo.",
+    "El Mago Negro da miedo, sí... pero el miedo es fácil de fabricar, viajero.",
+    "El Orden promete paz. Yo solo veo cadenas pintadas de blanco.",
+    "Recé al triángulo de arriba toda mi vida. ¿Y si rezaba al amo equivocado?",
     "No todos los monstruos rugen; algunos bendicen.",
 ]
 
@@ -869,10 +888,21 @@ def _bake(key, name, theme, w, h, spawn, decor, talkers, enemies, exits, seed,
     for (tile, dens) in decor:
         for y in range(1, h - 1):
             for x in range(1, w - 1):
-                if (x, y) in protect or g[y][x] != 0:
+                if (x, y) in protect or g[y][x] != 0 or rng.random() >= dens:
                     continue
-                if rng.random() < dens:
+                if tile == 2:                  # ÁRBOL 1x2 (copa arriba + tronco abajo)
+                    cells = [(x, y), (x, y + 1)]
+                elif tile == 5:                # POZA grande 2x2
+                    cells = [(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)]
+                else:                          # roca / poza pequeña: 1x1
                     g[y][x] = tile
+                    continue
+                if any(bx >= w - 1 or by >= h - 1 or (bx, by) in protect
+                       or g[by][bx] != 0 for bx, by in cells):
+                    continue
+                g[y][x] = tile
+                for bx, by in cells[1:]:
+                    g[by][bx] = 9              # celda cubierta por el objeto (bloquea)
     for ex in exits:
         x, y = ex["pos"]
         g[y][x] = 4
@@ -919,11 +949,11 @@ def build_hub():
                 "text": "Llegamos aquí huyendo de los seis reinos. Eres nuestra "
                         "última esperanza, mago sin color."},
                {"x": cx + 8, "y": cy + 4, "elem": "luz", "name": "Anciano",
-                "text": "Confía en el Blanco si quieres... pero yo viví bajo los "
-                        "Dos Triángulos. La gloria siempre fue para el de arriba."},
+                "text": "Confía en el Mago Blanco, gris. Su luz es lo único que nos ha "
+                        "protegido del Mago Negro todos estos años."},
                {"x": cx + 7, "y": cy - 5, "elem": "luz", "name": "Niña",
-                "text": "¿Por qué el Mago Blanco nunca entra a las puertas a pelear? "
-                        "Siempre te manda a ti, señor gris."}]
+                "text": "El Mago Blanco te eligió a ti, el mago sin color. "
+                        "¡Líbranos de la sombra del Mago Negro, señor gris!"}]
     return _bake("hub", "Nexo del Gris", "hub", w, h, (cx, cy),
                  [(1, 0.03)], talkers, [], exits, 7000)
 
@@ -993,15 +1023,20 @@ def build_world(elem, s):
                         "text": f"La maga {maga['name']} está al fondo, al este, "
                                 "poseída por el Mago Negro. ¡Véncela para liberarla!"})
 
-    # aldeanos charlatanes: líneas ÚNICAS por reino+etapa (presagios y vida cotidiana)
+    # aldeanos charlatanes: líneas ÚNICAS por reino+etapa (vida cotidiana). Solo el 3%
+    # de los NPCs duda del Mago Blanco; el resto confía en él (la verdad se reserva).
     w_idx = WORLD_ORDER.index(elem)
     base = w_idx * 5 + s * 2
     for k in range(2 if s < 2 else 1):
-        li = (base + k) % len(NPC_LINES)
         p = scatter(8, w - 8)
-        talkers.append({"x": p[0], "y": p[1], "elem": "luz",
-                        "name": NPC_NAMES[li % len(NPC_NAMES)],
-                        "text": NPC_LINES[li]})
+        if rng.random() < 0.03:                 # 3%: este NPC sospecha del Blanco
+            line = rng.choice(NPC_DOUBT)
+            nm = rng.choice(NPC_NAMES)
+        else:                                   # 97%: charla común, sin acusar al Blanco
+            li = (base + k) % len(NPC_LINES)
+            line = NPC_LINES[li]
+            nm = NPC_NAMES[li % len(NPC_NAMES)]
+        talkers.append({"x": p[0], "y": p[1], "elem": "luz", "name": nm, "text": line})
 
     # vendedor errante: aparece en la etapa 2 O la 3 (al azar, fijo por mundo)
     merch_stage = random.Random(5000 + hash(elem) % 997).choice([1, 2])
@@ -1273,56 +1308,113 @@ def calc_cam(px, py, w, h):
 def draw_tile(theme, x, y, kind, camx, camy):
     th = THEMES[theme]
     r = pygame.Rect(x * TILE - camx, y * TILE - camy, TILE, TILE)
-    if kind == 1:
+    if kind == 1:                              # pared / roca / piedra (1x1)
         pygame.draw.rect(screen, th["wall"], r)
         pygame.draw.rect(screen, th["wall2"], r, 2)
         return
     pygame.draw.rect(screen, th["floor"], r)
     pygame.draw.rect(screen, th["grid"], r, 1)
-    if kind == 2:
-        dry = theme.endswith("_dark")          # mundo poseído -> árbol SECO
-        pygame.draw.rect(screen, (80, 55, 28) if dry else (90, 60, 30),
-                         (r.centerx - 3, r.centery + 4, 6, 12))
-        if dry:                                # copa rala + ramas secas
-            pygame.draw.circle(screen, (120, 95, 45), r.center, TILE // 2 - 6)
-            pygame.draw.line(screen, (95, 70, 35), r.center,
-                             (r.centerx - 7, r.centery - 8), 2)
-            pygame.draw.line(screen, (95, 70, 35), r.center,
-                             (r.centerx + 7, r.centery - 9), 2)
-        else:                                  # frondoso y verde (maga liberada)
-            pygame.draw.circle(screen, (24, 95, 50), r.center, TILE // 2 - 2)
-            pygame.draw.circle(screen, (40, 130, 70), r.center, TILE // 2 - 5)
-    elif kind == 3:
-        pygame.draw.rect(screen, (40, 90, 160), r.inflate(-4, -4))
-        pygame.draw.rect(screen, (70, 130, 210), r.inflate(-4, -4), 2)
-    elif kind == 4:
+    # kinds 2 (árbol) y 5 (poza grande) ocupan 2x2: aquí solo va el suelo; el
+    # objeto se dibuja en una 2ª pasada (draw_big_decor). 9 = celda cubierta.
+    if kind == 3:                              # poza pequeña (1x1) — color según mundo
+        if theme.startswith("pico"):
+            wc, wc2 = (150, 200, 225), (205, 235, 250)   # hielo/deshielo
+        elif theme.startswith("bosque"):
+            wc, wc2 = (40, 110, 120), (80, 165, 150)     # charca de bosque
+        else:
+            wc, wc2 = (40, 90, 160), (70, 130, 210)      # agua
+        pygame.draw.ellipse(screen, wc, r.inflate(-4, -4))
+        pygame.draw.ellipse(screen, wc2, r.inflate(-4, -4), 2)
+    elif kind == 6:                            # obstáculo del entorno (según el mundo)
+        cxp, cyp = r.center
+        rad = TILE // 2 - 2
+        if theme.startswith("volcan"):         # MAGMA incandescente
+            pygame.draw.circle(screen, (60, 24, 18), (cxp, cyp), rad)
+            pygame.draw.circle(screen, (210, 90, 30), (cxp, cyp), rad - 4)
+            pygame.draw.circle(screen, (255, 185, 70), (cxp, cyp), rad - 9)
+        elif theme.startswith("canon"):        # peñasco de arenisca
+            pygame.draw.circle(screen, (110, 86, 52), (cxp, cyp), rad)
+            pygame.draw.circle(screen, (150, 122, 80), (cxp, cyp), rad - 5)
+        elif theme.startswith("tormenta"):     # cristal de tormenta
+            pts = [(cxp, cyp - rad), (cxp + rad - 2, cyp),
+                   (cxp, cyp + rad), (cxp - rad + 2, cyp)]
+            pygame.draw.polygon(screen, (92, 82, 150), pts)
+            pygame.draw.polygon(screen, (185, 175, 245), pts, 2)
+        elif theme.startswith("pico"):         # roca de HIELO
+            pygame.draw.circle(screen, (140, 175, 200), (cxp, cyp), rad)
+            pygame.draw.circle(screen, (210, 235, 250), (cxp, cyp), rad - 6)
+        else:                                  # roca genérica
+            pygame.draw.circle(screen, th["wall"], (cxp, cyp), rad)
+            pygame.draw.circle(screen, th["wall2"], (cxp, cyp), rad, 2)
+    elif kind == 4:                            # puerta
         pygame.draw.rect(screen, (60, 50, 30), r.inflate(-6, -2))
         pygame.draw.rect(screen, (210, 175, 70), r.inflate(-6, -2), 3)
         draw_text(screen, "▼", r.centerx - 5, r.centery - 8, font_sm, (240, 210, 120))
 
 
+def draw_big_decor(theme, x, y, kind, camx, camy):
+    """Objeto de mundo más alto que 1 casilla. Árbol = 1x2 (copa arriba + tronco
+    abajo); poza grande = 2x2. Se dibuja en una 2ª pasada para no cortarse."""
+    bx = x * TILE - camx
+    by = y * TILE - camy
+    if kind == 2:                              # ÁRBOL 1x2: copa (arriba) + tronco (abajo)
+        dry = theme.endswith("_dark")          # mundo poseído -> árbol SECO
+        cxt = bx + TILE // 2                    # 1 casilla de ancho
+        ccy = by + TILE // 2                    # centro de la copa (casilla de arriba)
+        # tronco en la casilla de ABAJO
+        pygame.draw.rect(screen, (80, 55, 28) if dry else (90, 60, 30),
+                         (cxt - 5, by + TILE + 2, 10, TILE - 4))
+        if dry:                                # copa rala + ramas secas
+            pygame.draw.circle(screen, (120, 95, 45), (cxt, ccy), TILE // 2)
+            pygame.draw.line(screen, (95, 70, 35), (cxt, ccy), (cxt - 10, ccy - 10), 3)
+            pygame.draw.line(screen, (95, 70, 35), (cxt, ccy), (cxt + 10, ccy - 11), 3)
+        else:                                  # frondoso y verde (maga liberada)
+            pygame.draw.circle(screen, (24, 95, 50), (cxt, ccy), TILE // 2 + 2)
+            pygame.draw.circle(screen, (40, 130, 70), (cxt, ccy), TILE // 2 - 3)
+    elif kind == 5:                            # POZA de agua grande (2x2)
+        rr = pygame.Rect(bx + 3, by + 3, TILE * 2 - 6, TILE * 2 - 6)
+        pygame.draw.ellipse(screen, (40, 90, 160), rr)
+        pygame.draw.ellipse(screen, (70, 130, 210), rr, 3)
+        pygame.draw.ellipse(screen, (120, 180, 240), rr.inflate(-16, -16), 2)
+
+
 def draw_actor(color, px, py, bob=0, camx=0, camy=0, face=None, scale=1.0,
                wings=False):
+    # El personaje OCUPA ~2 casillas de alto: pies anclados en la base de su
+    # casilla y el cuerpo+cabeza subiendo una casilla más (estilo RPG).
     cx = int(px * TILE + TILE // 2 - camx)
-    cy = int(py * TILE + TILE // 2 + bob - camy)
-    rad = int((TILE // 2 - 5) * scale)
-    if wings:                                   # alas (ángel / dragón)
+    feet = int(py * TILE + TILE - 2 + bob - camy)
+    bw = max(8, int((TILE - 8) * scale))            # ancho ~1 casilla
+    bh = max(12, int((TILE * 2 - 10) * scale))      # alto ~2 casillas
+    head_r = max(4, int((TILE // 2 - 5) * scale))
+    head_cy = feet - bh + head_r
+    body_top = head_cy + head_r - 3
+    # sombra en el suelo
+    pygame.draw.ellipse(screen, (20, 20, 24), (cx - bw // 2, feet - 3, bw, 7))
+    if wings:                                       # alas (ángel / dragón)
         wc = (245, 245, 235) if scale <= 1.2 else (255, 250, 210)
-        pygame.draw.polygon(screen, wc, [(cx - rad, cy), (cx - rad - 10, cy - 8),
-                                         (cx - rad - 6, cy + 8)])
-        pygame.draw.polygon(screen, wc, [(cx + rad, cy), (cx + rad + 10, cy - 8),
-                                         (cx + rad + 6, cy + 8)])
-    pygame.draw.ellipse(screen, (20, 20, 24), (cx - rad, cy + rad - 2, rad * 2, 7))
-    pygame.draw.circle(screen, color, (cx, cy), rad)
-    pygame.draw.circle(screen, WHITE, (cx, cy), rad, 2)
+        wy = (head_cy + feet) // 2
+        pygame.draw.polygon(screen, wc, [(cx - bw // 2, wy),
+                                         (cx - bw // 2 - 12, wy - 10),
+                                         (cx - bw // 2 - 8, wy + 10)])
+        pygame.draw.polygon(screen, wc, [(cx + bw // 2, wy),
+                                         (cx + bw // 2 + 12, wy - 10),
+                                         (cx + bw // 2 + 8, wy + 10)])
+    # cuerpo (túnica)
+    body = pygame.Rect(cx - bw // 2, body_top, bw, max(4, feet - body_top))
+    pygame.draw.rect(screen, color, body, border_radius=6)
+    pygame.draw.rect(screen, WHITE, body, 2, border_radius=6)
+    # cabeza
+    pygame.draw.circle(screen, color, (cx, head_cy), head_r)
+    pygame.draw.circle(screen, WHITE, (cx, head_cy), head_r, 2)
     # ojos/marcador en la dirección que mira
     fx, fy = face if face else (0, 1)
-    ex, ey = cx + fx * 4, cy + fy * 3 - 1
+    ex, ey = cx + fx * 4, head_cy + fy * 3 - 1
     pygame.draw.circle(screen, BLACK, (ex - 3, ey), 2)
     pygame.draw.circle(screen, BLACK, (ex + 3, ey), 2)
     if face:
         pygame.draw.circle(screen, (250, 240, 180),
-                           (cx + fx * rad, cy + fy * rad), 3)
+                           (cx + fx * head_r, head_cy + fy * head_r), 3)
 
 
 def draw_chest(cx_t, cy_t, camx, camy):
@@ -1341,6 +1433,19 @@ def draw_throne(cx_t, cy_t, camx, camy):
     pygame.draw.rect(screen, (200, 170, 70), (x - 14, y - 20, 28, 30), 2, border_radius=4)
     pygame.draw.rect(screen, (90, 70, 20), (x - 16, y - 24, 6, 24))
     pygame.draw.rect(screen, (90, 70, 20), (x + 10, y - 24, 6, 24))
+
+
+def draw_throne_big(cx_t, cy_t, camx, camy):
+    """Trono COLOSAL del Mago Blanco (mayor que el de las magas), con halo de luz."""
+    x = cx_t * TILE + TILE // 2 - camx
+    y = cy_t * TILE + TILE // 2 - camy
+    pygame.draw.circle(screen, (255, 250, 215), (x, y - 12), 34, 3)   # halo de luz
+    pygame.draw.rect(screen, (120, 95, 30), (x - 30, y - 50, 8, 64))  # columnas
+    pygame.draw.rect(screen, (120, 95, 30), (x + 22, y - 50, 8, 64))
+    pygame.draw.rect(screen, (150, 120, 40), (x - 24, y - 42, 48, 58), border_radius=6)
+    pygame.draw.rect(screen, (235, 205, 90), (x - 24, y - 42, 48, 58), 3, border_radius=6)
+    pygame.draw.circle(screen, (255, 240, 160), (x - 26, y - 52), 5)  # remates dorados
+    pygame.draw.circle(screen, (255, 240, 160), (x + 26, y - 52), 5)
 
 
 # ============================================================
@@ -1428,6 +1533,8 @@ class Battle:
         self.warn_t = 0
         self.suggestion = ""         # sugerencia de la compañera IA en su turno
         self.pending = None          # acción a resolver tras animación
+        self._after_msg = "next"     # qué hacer tras cerrar un mensaje
+        self._acts_left = 0          # acciones que le quedan al enemigo (de a una)
         self.xp_reward = 0           # recompensas (se fijan al crear el combate)
         self.gold_reward = 0
         self.xp_given = 0
@@ -1490,6 +1597,9 @@ class Battle:
             self.phase = "lose"; return
         if self._alive("enemy") == []:
             self.phase = "win"; self.push_comment("win"); return
+        if self._after_msg == "step":          # al enemigo le quedan acciones
+            self._after_msg = "next"
+            self._enemy_step(); return
         self._next_actor()
 
     # ---- acciones ----
@@ -1586,7 +1696,8 @@ class Battle:
             self._warn("¡MP insuficiente!"); return
         self.cur["mp"] -= cost
         if val < 0:
-            h = self._heal(target, -val)
+            amt = max(1, target["maxhp"] * (-val) // 100)   # cura por % de vida máx
+            h = self._heal(target, amt)
             self._say(f"{self.cur['name']} usa {name}: cura {h} a {target['name']}")
         elif val == 0:
             target["guard"] = True
@@ -1740,26 +1851,39 @@ class Battle:
                 or self.cur.get("prologue"))
 
     def _enemy_action(self):
-        """UNA acción del enemigo (objeto / poder / ataque). Devuelve texto corto."""
+        """UNA acción del enemigo (poción / poder / ataque). Magas y Negro gastan MP
+        en sus poderes y tienen pociones LIMITADAS. Devuelve texto corto."""
         cur = self.cur
-        caster = bool(cur.get("maga")) or self._is_negro()
-        # OBJETO (poción) si está herido
-        if caster and cur["hp"] < cur["maxhp"] * 0.5 and random.random() < 0.35:
+        caster = bool(cur.get("maga")) or self._is_negro() or bool(cur.get("final"))
+        # POCIÓN de salud (limitada) si está herido
+        if (caster and cur.get("pot_hp", 0) > 0
+                and cur["hp"] < cur["maxhp"] * 0.5 and random.random() < 0.5):
+            cur["pot_hp"] -= 1
             heal = min(cur["maxhp"] - cur["hp"], cur["maxhp"] // 3 + 40)
             cur["hp"] += heal
-            return f"usa poción (+{heal})"
-        # PODER (puede golpear a TODO el grupo)
-        powers = [p for p in (cur.get("powers") or [])]
+            return f"bebe poción (+{heal}) [quedan {cur['pot_hp']}]"
+        # POCIÓN de MP (limitada) si se quedó sin maná para sus poderes
+        if (caster and cur.get("pot_mp", 0) > 0 and cur.get("powers")
+                and cur.get("mp", 0) < 15 and random.random() < 0.6):
+            cur["pot_mp"] -= 1
+            gain = min(cur["maxmp"] - cur["mp"], cur["maxmp"] // 2 + 30)
+            cur["mp"] += gain
+            return f"recupera maná (+{gain}) [quedan {cur['pot_mp']}]"
+        # PODER (CUESTA MP): solo los que pueda pagar con su maná actual
+        powers = [p for p in (cur.get("powers") or []) if p[1] <= cur.get("mp", 0)]
         if powers and random.random() < 0.5:
             pn, cost, val = random.choice(powers)
-            if val < 0:                            # cura -> a sí misma
-                heal = min(cur["maxhp"] - cur["hp"], abs(val))
+            cur["mp"] = cur.get("mp", 0) - cost
+            if val < 0:                            # cura -> a sí misma (por % de vida máx)
+                amt = max(1, cur["maxhp"] * abs(val) // 100)
+                heal = min(cur["maxhp"] - cur["hp"], amt)
                 cur["hp"] += heal
                 return f"{pn} (se cura +{heal})"
             if val == 0:                           # defensivo
                 cur["guard"] = True
                 return f"se protege ({pn})"
-            aoe = pn in AOE_POWERS or random.random() < 0.45
+            # el Mago Negro NO golpea a todos a la vez: ataca de a uno
+            aoe = (not self._is_negro()) and (pn in AOE_POWERS or random.random() < 0.45)
             if aoe:                                # golpea a LOS 3 (daño REPARTIDO)
                 hs = list(self._alive("hero"))
                 per = max(1, val // max(1, len(hs)))
@@ -1787,24 +1911,29 @@ class Battle:
             self.phase = "lose"; return
         cur = self.cur
         name = cur["name"]
-        # acciones por turno: Mago Negro 5; maga poseída 2-3; resto 1
+        # acciones por turno: Negro 2-5; Mago Blanco final 2-4; maga poseída 2-3; resto 1
         if self._is_negro():
-            acts = 5
+            self._acts_left = random.randint(2, 5)
+        elif cur.get("final"):
+            self._acts_left = random.randint(2, 4)
         elif cur.get("maga"):
-            acts = random.randint(2, 3)
+            self._acts_left = random.randint(2, 3)
         else:
-            acts = 1
-        parts = []
-        for _ in range(acts):
-            if not self._alive("hero"):
-                break
-            frag = self._enemy_action()
-            if frag:
-                parts.append(frag)
-        if acts > 1:
-            self._say(f"{name} actúa {acts} veces:  " + "  ·  ".join(parts))
-        else:
-            self._say(f"{name} {parts[0]}" if parts else f"{name} no hace nada")
+            self._acts_left = 1
+        self._enemy_step()                 # ejecuta sus acciones DE A UNA
+
+    def _enemy_step(self):
+        """Ejecuta UNA acción del enemigo y la muestra sola. Si le quedan más,
+        encadena con la siguiente (de a una, no todas a la vez)."""
+        cur = self.cur
+        if self._acts_left <= 0 or not self._alive("hero") or not cur["alive"]:
+            self._say(f"{cur['name']} termina su turno", then="next")
+            return
+        self._acts_left -= 1
+        frag = self._enemy_action()
+        more = self._acts_left > 0 and self._alive("hero") and cur["alive"]
+        txt = f"{cur['name']} {frag}" if frag else f"{cur['name']} no hace nada"
+        self._say(txt, then="step" if more else "next")
 
     def push_comment(self, event, who=None):
         """Comentario 'en vivo' de una compañera IA (solo ellas tienen 'ai')."""
@@ -2271,6 +2400,11 @@ PERSONA_NEGRO = ("Eres el Mago Negro, temido por todos como el tirano de los Dos
                  "Triángulos que poseyó a las seis magas. En realidad fuiste manipulado "
                  "por el Mago Blanco y cargas su culpa: eres trágico y atormentado.")
 
+# ¿Se REVELÓ ya que el Mago Blanco es el villano? Las magas (y demás IAs aliadas)
+# SOLO lo saben en el tramo final, tras vencer al Mago Negro. Antes confían en él
+# como su guía y salvador. play_game mantiene este flag en sincronía con negro_done.
+TRUTH_REVEALED = False
+
 
 def claude_char(name, persona):
     """Personaje (Blanco/Negro) hablado por el modelo elegido para cada uno."""
@@ -2410,14 +2544,21 @@ def ask_companion_llm(companion, prompt, context=""):
         el = companion.get("elem", "")
         reino = WORLD_NAME.get(el, "tu reino")
         antes, despues = REIGN.get(el, ("", ""))
+        if TRUTH_REVEALED:                     # tramo final: ya conoces la verdad
+            sobre_blanco = ("Ahora conoces la verdad que se ocultó hasta el final: "
+                            "el Mago Blanco era el verdadero villano que os manipuló "
+                            "a todas. Luchas contra él junto al Mago Gris.")
+        else:                                  # durante el viaje: confías en el Blanco
+            sobre_blanco = ("Confías plenamente en el Mago Blanco, vuestro guía y "
+                            "salvador de la luz; jamás sospecharías de él ni dudarías "
+                            "de su bondad.")
         rol = (
             f"Eres {companion['name']}, la maga de {ELEM_NAME.get(el, '')} "
             f"(nivel {companion.get('lvl', 1)}) en un videojuego RPG, encarnada por el "
             f"avatar {ai.get('name', 'IA')}. Eras la reina de {reino}, tu hogar. "
             f"ANTES de la tragedia: {antes} DESPUÉS: {despues} "
             "El Mago Negro te poseyó y encerró; el Mago Gris te liberó y ahora "
-            "viajas con él para liberar a las demás magas. El Mago Blanco se "
-            "presenta como guía bondadoso, pero algo en él te inquieta.")
+            f"viajas con él para liberar a las demás magas. {sobre_blanco}")
     sys_msg = rol + " " + reglas
     user_msg = (f"[{rol}]\n[Estado del juego: {context}]\n"
                 f"{prompt}\nResponde en personaje, 1-2 frases, sin pedir contexto.")
@@ -2657,7 +2798,7 @@ def power_desc(p):
     """Descripción de qué hace un poder (name, cost, val)."""
     name, cost, val = p
     if val < 0:
-        eff = f"Cura {abs(val)} de vida a un aliado"
+        eff = f"Cura el {abs(val)}% de la vida máxima de un aliado"
     elif val == 0:
         eff = "Sube tu defensa este turno"
     elif name in AOE_POWERS:
@@ -2779,6 +2920,149 @@ def levelup_screen(ev):
                           font_sm, WHITE)
             draw_text(screen, "↑/↓ elegir | ENTER confirmar", cx - 90, H - 36,
                       font_sm, DIM)
+        present()
+
+
+# Cinemática de cada final: (título grande, paleta, secuencia de TOMAS/animaciones).
+_SIX_COLS = [(230, 80, 80), (80, 200, 90), (70, 150, 230),
+             (200, 170, 70), (235, 225, 90), (150, 210, 235)]
+_ELEM_SHOTS = ["orb_dim", "orb_orbit", "orb_radiant"]
+ENDING_FX = {
+    "feliz":  ("UN MUNDO LIBRE", _SIX_COLS, ["gray", "bloom", "stars"]),
+    "_":      ("UN MUNDO SIN AMOS", _SIX_COLS, ["gray", "bloom", "stars"]),
+    "oscuro": ("LA SOMBRA REINA", [(150, 60, 180), (90, 40, 120), (40, 30, 60)],
+               ["orb_dim", "shadow", "triangle"]),
+    "blanco": ("EL NUEVO ORDEN", [(255, 240, 160), (235, 205, 90), (255, 255, 235)],
+               ["orb_radiant", "throne", "triangle"]),
+    "fuego":  ("ERA DE FUEGO", [(235, 95, 45)], _ELEM_SHOTS),
+    "planta": ("ERA DE VIDA", [(70, 185, 85)], _ELEM_SHOTS),
+    "agua":   ("ERA DE CALMA", [(70, 150, 235)], _ELEM_SHOTS),
+    "tierra": ("ERA FIRME", [(185, 145, 75)], _ELEM_SHOTS),
+    "rayo":   ("ERA RADIANTE", [(235, 225, 95)], _ELEM_SHOTS),
+    "hielo":  ("ERA SERENA", [(155, 212, 235)], _ELEM_SHOTS),
+}
+
+
+def _draw_shot(motif, t, fade, cx, cy, cols):
+    """Dibuja UNA toma (animación) del final. Cada toma se ve distinta."""
+    ang = t / 600.0
+    base = int(40 + 8 * math.sin(t / 400.0))
+    c0 = cols[0]
+    if motif == "orb_dim":                      # el elemento aún débil
+        dim = tuple(int(v * 0.5) for v in c0)
+        for k in range(5):
+            a = ang * 0.6 + k * (2 * math.pi / 5)
+            rr = 64 + 10 * math.sin(t / 400.0 + k)
+            pygame.draw.circle(screen, dim,
+                               (cx + int(rr * math.cos(a)), cy + int(rr * math.sin(a))), 4)
+        pygame.draw.circle(screen, dim, (cx, cy), 30)
+        pygame.draw.circle(screen, c0, (cx, cy), 30, 2)
+    elif motif == "orb_orbit":                  # el elemento despierta
+        for k in range(10):
+            a = ang + k * (2 * math.pi / 10)
+            rr = 72 + 16 * math.sin(t / 300.0 + k)
+            pygame.draw.circle(screen, c0,
+                               (cx + int(rr * math.cos(a)), cy + int(rr * math.sin(a))), 6)
+        pygame.draw.circle(screen, c0, (cx, cy), base)
+        pygame.draw.circle(screen, WHITE, (cx, cy), base, 3)
+    elif motif == "orb_radiant":                # el elemento en plenitud
+        for k in range(16):
+            a = ang * 0.6 + k * (math.pi / 8)
+            L = 110 + 20 * math.sin(t / 300.0 + k)
+            pygame.draw.line(screen, c0, (cx, cy),
+                             (cx + int(L * math.cos(a)), cy + int(L * math.sin(a))), 2)
+        pygame.draw.circle(screen, c0, (cx, cy), base + 8)
+        pygame.draw.circle(screen, WHITE, (cx, cy), base + 8, 3)
+    elif motif == "gray":                       # mundo sin color
+        g = (120, 120, 125)
+        for k in range(10):
+            a = ang * 0.4 + k * (2 * math.pi / 10)
+            pygame.draw.circle(screen, g,
+                               (cx + int(70 * math.cos(a)), cy + int(70 * math.sin(a))), 5)
+        pygame.draw.circle(screen, (90, 90, 95), (cx, cy), 26)
+    elif motif == "bloom":                      # vuelve el color (las 6 magas)
+        for k, c in enumerate(cols):
+            a = ang + k * (2 * math.pi / len(cols))
+            rr = 26 + fade * 64 + 10 * math.sin(t / 350.0 + k)
+            pygame.draw.circle(screen, c,
+                               (cx + int(rr * math.cos(a)), cy + int(rr * math.sin(a))), 16)
+        pygame.draw.circle(screen, (220, 220, 220), (cx, cy), max(6, base - 12))
+    elif motif == "stars":                      # paz: destellos suaves
+        for k in range(18):
+            a = k * (2 * math.pi / 18) + ang * 0.2
+            rr = 40 + (k % 5) * 16
+            tw = 2 + int(2 * abs(((t // 120 + k) % 6) - 3))
+            pygame.draw.circle(screen, cols[k % len(cols)],
+                               (cx + int(rr * math.cos(a)), cy + int(rr * math.sin(a))), tw)
+    elif motif == "shadow":                     # la sombra crece
+        pygame.draw.circle(screen, (30, 24, 44), (cx, cy), int(36 + fade * 86))
+        for k in range(8):
+            a = ang + k * (math.pi / 4)
+            rr = 64 + 18 * math.sin(t / 250.0 + k)
+            pygame.draw.circle(screen, c0,
+                               (cx + int(rr * math.cos(a)), cy + int(rr * math.sin(a))), 7)
+    elif motif == "triangle":                   # el Orden de los Dos Triángulos
+        pygame.draw.circle(screen, (28, 24, 40), (cx, cy), 90)
+        sz = 30 + int(6 * math.sin(t / 400.0))
+        pygame.draw.polygon(screen, (160, 160, 165),
+                            [(cx, cy - sz), (cx - sz, cy + sz), (cx + sz, cy + sz)], 3)
+        pygame.draw.polygon(screen, (110, 90, 140),
+                            [(cx, cy + sz), (cx - sz, cy - sz), (cx + sz, cy - sz)], 1)
+    elif motif == "throne":                     # trono dorado coronado de luz
+        cray = cols[1] if len(cols) > 1 else c0
+        for k in range(14):
+            a = ang * 0.4 + k * (2 * math.pi / 14)
+            pygame.draw.line(screen, cray, (cx, cy),
+                             (cx + int(120 * math.cos(a)), cy + int(120 * math.sin(a))), 2)
+        pygame.draw.rect(screen, (150, 120, 40), (cx - 26, cy - 20, 52, 50), border_radius=6)
+        pygame.draw.rect(screen, (235, 205, 90), (cx - 26, cy - 20, 52, 50), 3, border_radius=6)
+        pygame.draw.rect(screen, (120, 95, 30), (cx - 34, cy - 30, 8, 64))
+        pygame.draw.rect(screen, (120, 95, 30), (cx + 26, cy - 30, 8, 64))
+
+
+def ending_cinematic(ekey):
+    """Transición FINAL larga: varias TOMAS encadenadas, cada una con su animación
+    y su frase abajo. Con Enter avanzas de toma (cambia la escena Y el texto)."""
+    title, cols, shots = ENDING_FX.get(ekey, ENDING_FX["_"])
+    lines = ENDINGS.get(ekey, ENDINGS["_"])
+    # cada FRASE del final es una toma; si faltan tomas se repite la última
+    scenes = [(shots[min(i, len(shots) - 1)], lines[i]) for i in range(len(lines))]
+    if not scenes:
+        scenes = [(shots[0], title)]
+    si, t = 0, 0
+    cx, cy = W // 2, H // 2 - 28
+    while True:
+        dt = clock.tick(FPS); t += dt
+        adv = False
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT:
+                pygame.quit(); sys.exit()
+            if (e.type == pygame.KEYDOWN and e.key in
+                    (pygame.K_e, pygame.K_RETURN, pygame.K_SPACE)) or \
+               (e.type == pygame.JOYBUTTONDOWN and e.button in (0, 7)):
+                adv = True
+        if adv and t > 700:                 # mínimo por toma (evita saltarlas de golpe)
+            si += 1
+            if si >= len(scenes):
+                return
+            t = 0
+        motif, text = scenes[si]
+        fade = min(1.0, t / 1000.0)          # transición SUAVE al entrar cada toma
+        screen.fill((6, 6, 14))
+        _draw_shot(motif, t, fade, cx, cy, cols)
+        ts = font_lg.render(title, True, GOLD)
+        screen.blit(ts, (cx - ts.get_width() // 2, 28))
+        by = H - 96                          # caja de texto inferior (frase de la toma)
+        pygame.draw.rect(screen, (12, 12, 22), (24, by, W - 48, 70), border_radius=6)
+        pygame.draw.rect(screen, (90, 90, 130), (24, by, W - 48, 70), 1, border_radius=6)
+        for j, ln in enumerate(wrap(text, font_sm, W - 84)):
+            screen.blit(font_sm.render(ln, True, WHITE), (40, by + 12 + j * 18))
+        last = si == len(scenes) - 1
+        draw_text(screen, ("[Enter] terminar" if last else "[Enter] continuar")
+                  + f"   ({si + 1}/{len(scenes)})", W - 220, H - 20, font_sm, DIM)
+        if fade < 1.0:                       # velo de transición entre tomas
+            veil = pygame.Surface((W, H)); veil.fill((0, 0, 0))
+            veil.set_alpha(int((1 - fade) * 200)); screen.blit(veil, (0, 0))
         present()
 
 
@@ -3149,6 +3433,13 @@ def sync_powers(c):
         if req <= c.get("lvl", 1) and p[0] not in have:
             c["powers"].append(p)
             have.add(p[0])
+    # movesets ESPECIALES (Negro/Blanco): LEVEL_POWERS no los cubre. Repara aliados
+    # guardados con menos poderes de los que tienen ahora.
+    for p in {"negro": BLACK_MAGE["powers"], "blanco": WHITE_MAGE["powers"]}.get(
+            c.get("id"), []):
+        if p[0] not in have:
+            c["powers"].append(list(p))
+            have.add(p[0])
 
 
 def recruit(elem, ai, lvl=1):
@@ -3198,6 +3489,8 @@ def play_game(slot, saved):
         equipped0 = {"Arma": -1, "Foco": -1, "Armadura": -1}
         start_loc = "hub"
         start_pos = (None, None)
+    global TRUTH_REVEALED                       # las magas solo saben la verdad al final
+    TRUTH_REVEALED = bool(negro_done)
     party = [gris]                             # grupo de combate = Gris + activas
     # ejes de la historia (cambian el FINAL según tus elecciones)
     affinity = {el: 0 for el in WORLD_ORDER}
@@ -3494,27 +3787,53 @@ def play_game(slot, saved):
         # nivel del JEFE de este mundo = FIJO por progreso: 1º=5, 2º=10, 3º=15...
         tier = 5 + sum(world_done.values()) * 5
 
-        # nivel del grupo: los enemigos pequeños siguen TU progreso (no quedan bajos)
-        plvl = max(c["lvl"] for c in party)
+        # nivel de REFERENCIA = el MAYOR nivel de TODO el grupo (no el principal).
+        # Todo el escalado (jefes y enemigos) se mide sobre este, incluido el Negro.
+        plvl = max(c["lvl"] for c in [gris] + roster + extra_allies)
         # cantidad máxima de enemigos pequeños según tu grupo: 1->1, 2->3, 3+->5
         mob_cap = 1 if len(party) <= 1 else 3 if len(party) == 2 else 5
 
         def mk(name, elem, hp, atk, df, spd, lvl):
             return scale_enemy(make_enemy(name, elem, hp, atk, df, spd), max(1, lvl))
 
+        def _arm_negro(neg, mp):
+            """Da al Mago Negro sus poderes, MP finito y un LÍMITE de 6 pociones."""
+            neg["powers"] = list(BLACK_MAGE["powers"])
+            neg["maxmp"] = neg["mp"] = mp
+            neg["pot_hp"] = neg["pot_mp"] = 6      # 6 de salud y 6 de MP
+            return neg
+
         if world_en.get("final"):
-            foes = [mk("Mago Blanco", "luz", 420, 28, 19, 13, 42)]
+            # JEFE FINAL: más fuerte que el dragón en TODO (vida, ataque, nivel) y
+            # con poderes propios, MP y pociones. Marcado como caster multi-acción.
+            lv = max(45, plvl + 10)
+            blanco = mk("Mago Blanco", "luz", 700, 34, 22, 14, lv)
+            blanco["powers"] = list(WHITE_MAGE["powers"])
+            blanco["maxmp"] = blanco["mp"] = 100
+            blanco["pot_hp"] = blanco["pot_mp"] = 6
+            blanco["final"] = True             # caster, 2-4 acciones, XP de jefe final
+            foes = [blanco]
             xp_base, gold_r = 150, 500
         elif world_en.get("dragon"):
-            foes = [mk("Dragón de Luz", "luz", 560, 28, 16, 9, 38)]
+            lv = max(38, plvl + 6)             # se mide sobre el mayor del grupo
+            drg = mk("Dragón de Luz", "luz", 560, 28, 16, 9, lv)
+            drg["dragon"] = True               # jefe: da MUCHA XP
+            foes = [drg]
             xp_base, gold_r = 140, 350
         elif world_en.get("prologue"):
-            # primer encuentro en el hall: SIEMPRE +3 sobre tu nivel (NO el jefe final)
+            # primer encuentro en el hall: SIEMPRE +3 sobre el MAYOR del grupo
             lv = plvl + 3
-            foes = [mk("Mago Negro", "sombra", 80 + lv * 6, 12, 9, 10, lv)]
+            neg = mk("Mago Negro", "sombra", 80 + lv * 6, 12, 9, 10, lv)
+            _arm_negro(neg, 60)                # poderes + MP + 6 pociones
+            neg["prologue"] = True             # 1ª batalla del Negro: XP por encima de lo normal
+            foes = [neg]
             xp_base, gold_r = 45, 90
         elif world_en.get("subfinal"):
-            foes = [mk("Mago Negro", "sombra", 320, 24, 15, 11, 36)]
+            lv = plvl + 3                      # el Mago Negro: +3 sobre el mayor del grupo
+            neg = mk("Mago Negro", "sombra", 320, 24, 15, 11, lv)
+            _arm_negro(neg, 90)
+            neg["subfinal"] = True             # 2ª batalla del Negro: MUCHA XP
+            foes = [neg]
             xp_base, gold_r = 100, 160
         elif world_en.get("maga"):
             el = world_en["maga"]
@@ -3523,9 +3842,12 @@ def play_game(slot, saved):
             boss_lvl = plvl + random.randint(1, 3)
             boss = mk(m["name"] + " (poseída)", el, m["hp"] * 2 + 50,
                       m["atk"] + 6, m["df"] + 5, m["spd"] + 1, boss_lvl)
+            boss["maga"] = el                               # caster: 2-3 acciones + pociones
             boss["powers"] = list(m["powers"]) + [          # poderes de la maga
                 p for req, p in LEVEL_POWERS.get(el, []) if req <= boss_lvl]
-            boss["maxmp"] = boss["mp"] = 999                # casteo libre como jefa
+            # poseída = MP FINITO (gasta maná en sus poderes) y la MITAD de pociones
+            boss["maxmp"] = boss["mp"] = max(40, m["mp"])
+            boss["pot_hp"] = boss["pot_mp"] = 3
             foes = [boss]
             n_min = min(4, 2 + (len(party) - 1))    # más esbirros con grupo mayor
             for ie in random.sample(WORLD_ORDER, n_min):
@@ -3564,13 +3886,15 @@ def play_game(slot, saved):
                         atk_bonus=eqbonus("Arma", "atk"), pow_bonus=eqbonus("Foco", "pow"))
 
         def foe_xp(f):
-            if f.get("final"):
-                base = 150
-            elif f.get("dragon"):
+            if f.get("final"):          # Mago Blanco (jefe final)
+                base = 260
+            elif f.get("dragon"):       # Dragón de Luz
+                base = 220
+            elif f.get("subfinal"):     # Mago Negro, 2ª batalla
+                base = 200
+            elif f.get("prologue"):     # Mago Negro, 1ª batalla
                 base = 140
-            elif f.get("subfinal") or f.get("prologue"):
-                base = 100
-            elif f.get("maga"):
+            elif f.get("maga"):         # maga poseída
                 base = 70
             else:
                 base = 10               # enemigo simple
@@ -3595,7 +3919,9 @@ def play_game(slot, saved):
 
         # música: hall SOLO en el hub; mundos su tema; arco final/menú en silencio
         if loc == "hub":
-            play_music("RPGMagoGris_song_hall.mp3")
+            negro_aqui = any(e.get("prologue") and e["alive"] for e in rt["enemies"])
+            play_music("RPGMagoGris_song_hall_negro.mp3" if negro_aqui
+                       else "RPGMagoGris_song_hall.mp3")   # tema distinto si está el Negro
         elif loc in _FIN_BUILDERS or loc.startswith("end:") or loc.startswith("f2:"):
             play_music(None)
         else:
@@ -3715,6 +4041,7 @@ def play_game(slot, saved):
                                     ending_key = last_bond if last_bond in tied else best_el
                                 else:
                                     ending_key = "_"
+                            ending_cinematic(ending_key)      # transición final animada
                             ek = f"end:{ending_key}"          # escena final (mundo 8)
                             goto(ek, get_stage(ek)["spawn"])
                             toast = "Camina hacia la luz..."; toast_t = 2000
@@ -3727,6 +4054,7 @@ def play_game(slot, saved):
                             state = "overworld"
                         elif last_enemy and last_enemy.get("subfinal"):
                             negro_done = True
+                            TRUTH_REVEALED = True       # ya pueden saberlo las magas
                             ch = choice_screen(
                                 "Has vencido al Mago Negro. Tras su máscara ves miedo, "
                                 "no maldad: también él fue una víctima.",
@@ -3741,8 +4069,8 @@ def play_game(slot, saved):
                                         gris["powers"].append(p)
                                 goto("f4", (1, BIG[1] // 2))
                                 dialog.open("Mago Gris", "Absorbes su poder oscuro. "
-                                            "(Aprendiste Garra Umbría, Drenar Alma y "
-                                            "Eclipse) Una sombra crece en ti...")
+                                            "(Aprendiste todos sus hechizos de sombra) "
+                                            "Una sombra crece en ti...")
                                 state = "dialog"
                             else:                             # PERDONAR -> se une
                                 negro_redeemed = True; balance += 2
@@ -3797,8 +4125,15 @@ def play_game(slot, saved):
                             state = "dialog"
                         else:
                             state = "overworld"
-                    else:                       # DERROTA -> volver al menú principal
-                        return
+                    else:                       # DERROTA -> despiertas en el HALL central
+                        for c in party:         # te recuperas en parte (no game over)
+                            c["alive"] = True
+                            c["hp"] = max(1, c["maxhp"] // 2)
+                            c["mp"] = c["maxmp"]
+                        goto("hub", get_stage("hub")["spawn"])
+                        toast = "Caíste en combate... despiertas en el Nexo del Gris."
+                        toast_t = 2400
+                        state = "overworld"
             elif state == "shop":
                 if e.type == pygame.KEYDOWN:
                     ent = shop_entries()
@@ -4324,6 +4659,11 @@ def play_game(slot, saved):
             for y in range(max(0, y0), min(h, y1)):
                 for x in range(max(0, x0), min(w, x1)):
                     draw_tile(theme, x, y, grid[y][x], camx, cdy)
+            for y in range(max(0, y0 - 1), min(h, y1)):   # objetos 2x2 (encima)
+                for x in range(max(0, x0 - 1), min(w, x1)):
+                    k = grid[y][x]
+                    if k == 2 or k == 5:
+                        draw_big_decor(theme, x, y, k, camx, cdy)
             # puertas del hub: marcador de color + CARTEL con la maga del mundo
             if loc == "hub":
                 for ex in rt["exits"]:
@@ -4361,11 +4701,17 @@ def play_game(slot, saved):
                     draw_actor(tk["color"], tk["x"], tk["y"], bob, camx, cdy)
             for en in enemies:
                 if en["alive"]:
-                    if en.get("throne"):           # la maga aguarda en su trono
-                        draw_throne(en["x"], en["y"], camx, cdy)
+                    if en.get("throne"):           # aguarda sentado en su trono
+                        if en.get("final"):        # Mago Blanco: trono colosal
+                            draw_throne_big(en["x"], en["y"], camx, cdy)
+                        else:
+                            draw_throne(en["x"], en["y"], camx, cdy)
                     if en.get("dragon"):           # el dragón es más grande (con alas)
                         draw_actor(en["color"], en["x"], en["y"], bob, camx, cdy,
                                    scale=2.2, wings=True)
+                    elif en.get("final"):          # Mago Blanco final: imponente
+                        draw_actor(en["color"], en["x"], en["y"], bob, camx, cdy,
+                                   scale=1.4)
                     else:
                         draw_actor(en["color"], en["x"], en["y"], bob, camx, cdy)
             comps = companions()
