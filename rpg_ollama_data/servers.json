@@ -1,0 +1,23 @@
+{
+  "_ayuda": "Pon la API key en apikeys.txt; aquí elige modelos por servidor.",
+  "openai": {
+    "models": [
+      "gpt-4o-mini"
+    ]
+  },
+  "groq": {
+    "models": [
+      "llama-3.3-70b-versatile"
+    ]
+  },
+  "anthropic": {
+    "models": [
+      "claude-3-5-haiku-latest"
+    ]
+  },
+  "google": {
+    "models": [
+      "gemini-1.5-flash"
+    ]
+  }
+}

@@ -17,6 +17,9 @@ import re
 import threading
 import time
 import json
+import base64
+import hashlib
+import hmac
 import urllib.request
 
 pygame.init()
@@ -63,7 +66,7 @@ def hp_color(frac):
 HD = (1280, 720)                   # ventana HD; F11 = pantalla completa
 _FULL = False
 _WIN = pygame.display.set_mode(HD)
-pygame.display.set_caption("Nerea RPG")
+pygame.display.set_caption("El Viaje del Mago (Ollama)")
 screen = pygame.Surface((W, H))    # lienzo interno; se escala a la ventana HD
 clock = pygame.time.Clock()
 
@@ -836,19 +839,60 @@ LIBERATED_LINES = [
     "{maga} ya cuida otra vez de las cosechas. {reino} no pasará hambre este invierno.",
 ]
 
+# Gratitud PROPIA de cada reino (no genérica): encaja con su elemento y su maga.
+LIBERATED_BY_ELEM = {
+    "fuego": [
+        "¡Las forjas de la Caldera vuelven a arder con calor amable! Gracias por Pyra.",
+        "Pyra ríe de nuevo y ningún hogar pasará frío este invierno. Te lo debemos, Gris.",
+        "El fuego de la Caldera ya calienta en vez de devorar. ¡Gracias, Mago Gris!",
+        "Volvemos a encender el hogar sin miedo. Pyra es libre por tu mano.",
+    ],
+    "planta": [
+        "El Bosque Esmeralda reverdece y las cosechas no tienen fin. ¡Gracias por Sylva!",
+        "Sylva hace florecer hasta la roca otra vez; los enfermos sanan a su sombra.",
+        "Las raíces ya no se pudren: el bosque volvió a mirarnos con cariño. Gracias, Gris.",
+        "Cada brote del Bosque lleva tu nombre, viajero. Liberaste a Sylva.",
+    ],
+    "agua": [
+        "Los ríos del Abismo vuelven limpios y los puertos, llenos de vida. ¡Gracias por Marina!",
+        "Marina le canta a las mareas y ellas responden. El mar es nuestro otra vez.",
+        "Se acabaron las pestes del agua estancada. Marina nos devolvió el Abismo, Gris.",
+        "Las redes vuelven llenas. Bendito seas por liberar a Marina.",
+    ],
+    "tierra": [
+        "Las minas del Cañón vuelven a dar oro y la montaña nos guarda como antes. ¡Gracias por Terra!",
+        "La tierra ya no se traga las aldeas: Terra distingue de nuevo amigo de enemigo.",
+        "El Cañón es firme otra vez. Terra movió una montaña por nosotros, Gris.",
+        "Cavamos seguros gracias a ti. Terra es libre.",
+    ],
+    "rayo": [
+        "Electra reparte su energía con justicia: ninguna lámpara se apaga. ¡Gracias, Gris!",
+        "Las noches de la Cima vuelven a ser fiesta; las tormentas ya no parten los tejados.",
+        "El rayo de Electra ilumina en vez de destruir. ¡Nos devolviste la Cima!",
+        "Cada chispa de la Tormenta te da las gracias, viajero gris.",
+    ],
+    "hielo": [
+        "El Pico regala inviernos serenos y agua pura de deshielo otra vez. ¡Gracias por Gélida!",
+        "Las ventiscas eternas cesaron: la calma de Gélida nos enseña paciencia de nuevo.",
+        "El silencio que congelaba se volvió quietud serena. Gracias, Mago Gris.",
+        "Los caminos del Pico se abren de nuevo. Gélida vela por nosotros.",
+    ],
+}
+
 
 def villager_text(tk, world_done):
-    """Texto del aldeano: si su maga ya fue liberada, una frase VARIADA (no repetida)."""
-    kind = tk.get("dyn")
-    if not kind:
-        return tk["text"]
+    """Texto del aldeano SEGÚN su reino: si la maga sigue POSEÍDA, su frase normal;
+    si ya fue LIBERADA (desposeída), una frase de gratitud variada."""
     el = tk.get("welem")
-    reino = ELEM_NAME.get(el, "")
-    maga = MAGA_BY_ELEM[el]["name"] if el in MAGA_BY_ELEM else ""
-    if world_done.get(el) and kind in ("ciudadano", "house"):
-        idx = (tk.get("x", 0) + tk.get("y", 0)) % len(LIBERATED_LINES)
-        return LIBERATED_LINES[idx].format(reino=reino, maga=maga)
-    return tk["text"]
+    if el and world_done.get(el):          # maga liberada -> gratitud PROPIA del reino
+        idx = tk.get("x", 0) + tk.get("y", 0)
+        lines = LIBERATED_BY_ELEM.get(el)
+        if lines:
+            return lines[idx % len(lines)]
+        reino = ELEM_NAME.get(el, "")      # reinos sin set propio (p.ej. neutro)
+        maga = MAGA_BY_ELEM[el]["name"] if el in MAGA_BY_ELEM else ""
+        return LIBERATED_LINES[idx % len(LIBERATED_LINES)].format(reino=reino, maga=maga)
+    return tk["text"]                       # poseída (o NPC sin reino): su texto normal
 
 
 def blank_grid(w, h):
@@ -1020,6 +1064,7 @@ def build_world(elem, s):
                             "chase": rng.random() < 0.35,
                             "name": rng.choice(creatures)})
         talkers.append({"x": 10, "y": cy, "elem": "luz", "name": "Aldeano",
+                        "welem": elem,
                         "text": f"La maga {maga['name']} está al fondo, al este, "
                                 "poseída por el Mago Negro. ¡Véncela para liberarla!"})
 
@@ -1036,7 +1081,8 @@ def build_world(elem, s):
             li = (base + k) % len(NPC_LINES)
             line = NPC_LINES[li]
             nm = NPC_NAMES[li % len(NPC_NAMES)]
-        talkers.append({"x": p[0], "y": p[1], "elem": "luz", "name": nm, "text": line})
+        talkers.append({"x": p[0], "y": p[1], "elem": "luz", "name": nm,
+                        "text": line, "welem": elem})
 
     # vendedor errante: aparece en la etapa 2 O la 3 (al azar, fijo por mundo)
     merch_stage = random.Random(5000 + hash(elem) % 997).choice([1, 2])
@@ -1045,16 +1091,18 @@ def build_world(elem, s):
                         "name": "Mercader Errante", "shop": True,
                         "text": "Mercancías para tu viaje, mago."})
 
-    # 1 casa por etapa con interior (2 aldeanos); el texto cambia por etapa
+    # 1 casa por etapa (3x3, más grande que la puerta) con interior (2 aldeanos)
     house_tiles = []
-    hx, hy = int(w * 0.42), cy - 7
-    for ddx in (0, 1, 2):               # techo
+    hx, hy = int(w * 0.42), cy - 8
+    for ddx in (0, 1, 2):               # techo (fila superior)
         house_tiles.append((hx + ddx, hy, 1))
-    house_tiles.append((hx, hy + 1, 1))             # paredes laterales
-    house_tiles.append((hx + 2, hy + 1, 1))
-    door = (hx + 1, hy + 1)                          # puerta de la casa
+    for ddy in (1, 2):                  # paredes laterales (2 filas de alto)
+        house_tiles.append((hx, hy + ddy, 1))
+        house_tiles.append((hx + 2, hy + ddy, 1))
+    house_tiles.append((hx + 1, hy + 1, 1))         # muro sobre la puerta
+    door = (hx + 1, hy + 2)                          # puerta abajo, al centro
     ikey = f"{elem}:{s}:house0"
-    HOUSES[ikey] = {"return_to": f"{elem}:{s}", "return_pos": (hx + 1, hy + 2),
+    HOUSES[ikey] = {"return_to": f"{elem}:{s}", "return_pos": (hx + 1, hy + 3),
                     "lore": LORE[(hash(elem) + s) % len(LORE)],
                     "elem": elem, "s": s}
     exits.append({"pos": door, "to": ikey, "spawn": (8, 8), "house": True})
@@ -1177,15 +1225,17 @@ def build_f2():
     # 2 casas con sus regalos
     tiles, exits = [], []
     for hi, hx in enumerate((int(w * 0.40), int(w * 0.62))):
-        hy = cy - 7
+        hy = cy - 8                                      # casa 3x3 (más grande que la puerta)
         for ddx in (0, 1, 2):
-            tiles.append((hx + ddx, hy, 1))
-        tiles.append((hx, hy + 1, 1)); tiles.append((hx + 2, hy + 1, 1))
+            tiles.append((hx + ddx, hy, 1))             # techo
+        for ddy in (1, 2):                              # paredes laterales (2 filas)
+            tiles.append((hx, hy + ddy, 1)); tiles.append((hx + 2, hy + ddy, 1))
+        tiles.append((hx + 1, hy + 1, 1))               # muro sobre la puerta
         ikey = f"f2:house{hi}"
-        HOUSES[ikey] = {"return_to": "f2", "return_pos": (hx + 1, hy + 2),
+        HOUSES[ikey] = {"return_to": "f2", "return_pos": (hx + 1, hy + 3),
                         "lore": LORE[hi % len(LORE)], "elem": "neutro", "s": 0,
                         "final_gift": True}
-        exits.append({"pos": (hx + 1, hy + 1), "to": ikey, "spawn": (8, 8),
+        exits.append({"pos": (hx + 1, hy + 2), "to": ikey, "spawn": (8, 8),
                       "house": True})
     talkers.append({"x": cx, "y": cy + 4, "elem": "neutro", "name": "Ermitaño",
                     "text": "Más allá aguarda el Mago Negro. Dicen que él también "
@@ -1346,10 +1396,17 @@ def draw_tile(theme, x, y, kind, camx, camy):
         else:                                  # roca genérica
             pygame.draw.circle(screen, th["wall"], (cxp, cyp), rad)
             pygame.draw.circle(screen, th["wall2"], (cxp, cyp), rad, 2)
-    elif kind == 4:                            # puerta
-        pygame.draw.rect(screen, (60, 50, 30), r.inflate(-6, -2))
-        pygame.draw.rect(screen, (210, 175, 70), r.inflate(-6, -2), 3)
-        draw_text(screen, "▼", r.centerx - 5, r.centery - 8, font_sm, (240, 210, 120))
+    elif kind == 4:
+        if theme == "casa":                    # SALIDA del interior: solo un cuadrado negro
+            pygame.draw.rect(screen, (0, 0, 0), r)
+            pygame.draw.rect(screen, (40, 40, 50), r, 1)
+        else:                                  # PUERTA (1x2: marco alto) en mundos/hub
+            d = pygame.Rect(r.x + 4, r.y - TILE + 4, TILE - 8, TILE * 2 - 8)
+            pygame.draw.rect(screen, (60, 50, 30), d, border_radius=3)
+            pygame.draw.rect(screen, (210, 175, 70), d, 3, border_radius=3)
+            pygame.draw.line(screen, (210, 175, 70), (d.centerx, d.y + 4),
+                             (d.centerx, d.bottom - 4), 1)  # juntura de las dos hojas
+            draw_text(screen, "▼", r.centerx - 5, r.centery - 6, font_sm, (240, 210, 120))
 
 
 def draw_big_decor(theme, x, y, kind, camx, camy):
@@ -1576,7 +1633,7 @@ class Battle:
         if self.cur["side"] == "enemy":
             self._enemy_turn()
         else:
-            # TÚ controlas a todos. Si es compañera IA, muestra su sugerencia.
+            # TÚ controlas a TODAS las aliadas (incl. magas IA); solo se sugiere.
             self.phase = "menu"
             self.menu_i = 0
             self.suggestion = self._ai_suggest(self.cur) if self.cur.get("ai") else ""
@@ -1808,6 +1865,14 @@ class Battle:
         names = "+".join(m["name"] for m in members)
         self._say(f"{names}: ¡{combo['name']} concentrado! ({d}){self._eff_tag()}")
 
+    def _enemy_pick_target(self):
+        """A quién golpea un enemigo: prioriza super-efectivo, luego el más herido."""
+        hs = self._alive("hero")
+        sup = [h for h in hs
+               if effectiveness(self.cur.get("elem"), h.get("elem")) >= SUPER]
+        pool = sup or hs
+        return min(pool, key=lambda h: h["hp"])
+
     def _ai_suggest(self, c):
         """La compañera IA RECOMIENDA una jugada (no la aplica). Hook para LLM."""
         allies = self._alive("hero")
@@ -1869,10 +1934,20 @@ class Battle:
             gain = min(cur["maxmp"] - cur["mp"], cur["maxmp"] // 2 + 30)
             cur["mp"] += gain
             return f"recupera maná (+{gain}) [quedan {cur['pot_mp']}]"
-        # PODER (CUESTA MP): solo los que pueda pagar con su maná actual
+        # PODER (CUESTA MP): ELIGE el mejor que pueda pagar (no al azar)
         powers = [p for p in (cur.get("powers") or []) if p[1] <= cur.get("mp", 0)]
-        if powers and random.random() < 0.5:
-            pn, cost, val = random.choice(powers)
+        if powers and random.random() < 0.55:
+            heals = [p for p in powers if p[2] < 0]
+            atks = [p for p in powers if p[2] > 0]
+            defs = [p for p in powers if p[2] == 0]
+            if heals and cur["hp"] < cur["maxhp"] * 0.45:      # grave -> se cura
+                pn, cost, val = max(heals, key=lambda p: -p[2])
+            elif atks:                                         # si no, el ataque MÁS fuerte
+                pn, cost, val = max(atks, key=lambda p: p[2])
+            elif defs:
+                pn, cost, val = defs[0]
+            else:
+                pn, cost, val = heals[0]
             cur["mp"] = cur.get("mp", 0) - cost
             if val < 0:                            # cura -> a sí misma (por % de vida máx)
                 amt = max(1, cur["maxhp"] * abs(val) // 100)
@@ -1893,14 +1968,14 @@ class Battle:
                     if h.get("ai") and h["alive"] and random.random() < 0.3:
                         self.push_comment("hurt", h)
                 return f"¡{pn}! a TODOS ({tot}){self._eff_tag()}"
-            t = random.choice(self._alive("hero"))
+            t = self._enemy_pick_target()          # objetivo elegido (super-efectivo/herido)
             d = self._damage(cur, t, val)
             return f"¡{pn}! a {t['name']} ({d}){self._eff_tag()}"
-        # ATAQUE normal
+        # ATAQUE normal (objetivo elegido)
         alive = self._alive("hero")
         if not alive:
             return None
-        t = random.choice(alive)
+        t = self._enemy_pick_target()
         txt, d = self._enemy_hit(t)
         if t.get("ai") and t["alive"] and random.random() < 0.4:
             self.push_comment("hurt", t)
@@ -1911,13 +1986,14 @@ class Battle:
             self.phase = "lose"; return
         cur = self.cur
         name = cur["name"]
-        # acciones por turno: Negro 2-5; Mago Blanco final 2-4; maga poseída 2-3; resto 1
+        # acciones por turno: Negro 2-5; Mago Blanco final 2-4; maga según progreso
+        # (1ª maga = 1; con 1+ magas liberadas = hasta 2); resto 1
         if self._is_negro():
             self._acts_left = random.randint(2, 5)
         elif cur.get("final"):
             self._acts_left = random.randint(2, 4)
         elif cur.get("maga"):
-            self._acts_left = random.randint(2, 3)
+            self._acts_left = random.randint(1, cur.get("max_acts", 2))
         else:
             self._acts_left = 1
         self._enemy_step()                 # ejecuta sus acciones DE A UNA
@@ -2493,6 +2569,253 @@ def chat_fallback(elem):
 # EDICIÓN OLLAMA: hablamos DIRECTO a Ollama (sin backend de Nerea).
 OLLAMA_API = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat")
 
+# ============================================================
+#  VARIOS SERVIDORES + API KEYS (se leen, guardan y ENCRIPTAN)
+# ============================================================
+# - Escribe tus claves en  rpg_ollama_data/apikeys.txt  (proveedor=clave).
+# - Al iniciar se LEEN, se guardan ENCRIPTADAS en apikeys.enc y el .txt se BORRA.
+# - Define qué modelos usar por servidor en  rpg_ollama_data/servers.json.
+# NOTA: el cifrado es LOCAL (clave en .keyfile junto a los datos); protege de ojos
+# casuales / texto plano, no de alguien con acceso a ambos archivos.
+_KEYFILE = os.path.join(_BASE, ".keyfile")
+_KEYS_ENC = os.path.join(_BASE, "apikeys.enc")
+_KEYS_PLAIN = os.path.join(_BASE, "apikeys.txt")
+_SERVERS_CFG = os.path.join(_BASE, "servers.json")
+_KEYS_TEMPLATE = (
+    "# Tus API keys (una por linea):  proveedor=clave\n"
+    "# Al iniciar el juego se leen, se GUARDAN ENCRIPTADAS y este archivo se BORRA.\n"
+    "# Proveedores: openai, groq, mistral, deepseek, openrouter, anthropic, google\n"
+    "# Ejemplo:\n"
+    "# openai=sk-...\n"
+    "# anthropic=sk-ant-...\n"
+    "# google=AIza...\n"
+)
+
+
+def _secret():
+    """Clave local para cifrar (32 bytes aleatorios, creada una sola vez)."""
+    try:
+        if os.path.exists(_KEYFILE):
+            with open(_KEYFILE, "rb") as f:
+                return f.read()
+        s = os.urandom(32)
+        with open(_KEYFILE, "wb") as f:
+            f.write(s)
+        try:
+            os.chmod(_KEYFILE, 0o600)
+        except Exception:
+            pass
+        return s
+    except Exception:
+        return b"nerea-rpg-ollama-fallback-secret"
+
+
+def _keystream(secret, nonce, n):
+    out = bytearray()
+    ctr = 0
+    while len(out) < n:
+        out += hashlib.sha256(secret + nonce + ctr.to_bytes(8, "big")).digest()
+        ctr += 1
+    return bytes(out[:n])
+
+
+def encrypt_str(s):
+    secret = _secret()
+    nonce = os.urandom(16)
+    pt = s.encode("utf-8")
+    ct = bytes(a ^ b for a, b in zip(pt, _keystream(secret, nonce, len(pt))))
+    mac = hmac.new(secret, nonce + ct, hashlib.sha256).digest()
+    return base64.b64encode(nonce + mac + ct).decode("ascii")
+
+
+def decrypt_str(blob):
+    secret = _secret()
+    raw = base64.b64decode(blob)
+    nonce, mac, ct = raw[:16], raw[16:48], raw[48:]
+    if not hmac.compare_digest(mac, hmac.new(secret, nonce + ct, hashlib.sha256).digest()):
+        raise ValueError("clave corrupta o secreto cambiado")
+    pt = bytes(a ^ b for a, b in zip(ct, _keystream(secret, nonce, len(ct))))
+    return pt.decode("utf-8")
+
+
+def _load_enc_keys():
+    if not os.path.exists(_KEYS_ENC):
+        return {}
+    try:
+        with open(_KEYS_ENC, "r", encoding="utf-8") as f:
+            return json.loads(decrypt_str(f.read()))
+    except Exception:
+        return {}
+
+
+def _save_enc_keys(d):
+    try:
+        with open(_KEYS_ENC, "w", encoding="utf-8") as f:
+            f.write(encrypt_str(json.dumps(d)))
+        try:
+            os.chmod(_KEYS_ENC, 0o600)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _import_plain_keys():
+    """Importa apikeys.txt al store ENCRIPTADO y BORRA el texto plano. Crea plantilla."""
+    keys = _load_enc_keys()
+    if not os.path.exists(_KEYS_PLAIN):
+        try:
+            with open(_KEYS_PLAIN, "w", encoding="utf-8") as f:
+                f.write(_KEYS_TEMPLATE)
+        except Exception:
+            pass
+        return keys
+    added = False
+    try:
+        with open(_KEYS_PLAIN, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                prov, val = line.split("=", 1)
+                prov, val = prov.strip().lower(), val.strip()
+                if val:
+                    keys[prov] = val
+                    added = True
+    except Exception:
+        pass
+    if added:
+        _save_enc_keys(keys)
+        try:                                   # borra las claves en texto plano
+            with open(_KEYS_PLAIN, "w", encoding="utf-8") as f:
+                f.write(_KEYS_TEMPLATE)
+        except Exception:
+            pass
+        print(f"[Claves] {len(keys)} API key(s) guardadas ENCRIPTADAS; apikeys.txt limpiado.")
+    return keys
+
+
+API_KEYS = _import_plain_keys()
+
+# Servidores soportados (Ollama local + nubes compatibles). 'type' define el formato.
+_DEFAULT_SERVERS = {
+    "ollama":     {"type": "ollama",    "url": OLLAMA_API, "models": []},
+    "openai":     {"type": "openai",    "url": "https://api.openai.com/v1/chat/completions", "models": []},
+    "groq":       {"type": "openai",    "url": "https://api.groq.com/openai/v1/chat/completions", "models": []},
+    "mistral":    {"type": "openai",    "url": "https://api.mistral.ai/v1/chat/completions", "models": []},
+    "deepseek":   {"type": "openai",    "url": "https://api.deepseek.com/v1/chat/completions", "models": []},
+    "openrouter": {"type": "openai",    "url": "https://openrouter.ai/api/v1/chat/completions", "models": []},
+    "anthropic":  {"type": "anthropic", "url": "https://api.anthropic.com/v1/messages", "models": []},
+    "google":     {"type": "google",    "url": "https://generativelanguage.googleapis.com/v1beta/models", "models": []},
+}
+
+
+def _load_servers():
+    srv = {k: {**v, "models": list(v.get("models", []))} for k, v in _DEFAULT_SERVERS.items()}
+    if os.path.exists(_SERVERS_CFG):
+        try:
+            with open(_SERVERS_CFG, "r", encoding="utf-8") as f:
+                user = json.load(f)
+            for name, cfg in user.items():
+                if name.startswith("_") or not isinstance(cfg, dict):
+                    continue
+                base = srv.get(name, {"type": "openai", "url": "", "models": []})
+                base.update(cfg)
+                srv[name] = base
+        except Exception:
+            pass
+    else:
+        try:
+            with open(_SERVERS_CFG, "w", encoding="utf-8") as f:
+                json.dump({"_ayuda": "Pon la API key en apikeys.txt; aquí elige modelos por servidor.",
+                           "openai": {"models": ["gpt-4o-mini"]},
+                           "groq": {"models": ["llama-3.3-70b-versatile"]},
+                           "anthropic": {"models": ["claude-3-5-haiku-latest"]},
+                           "google": {"models": ["gemini-1.5-flash"]}},
+                          f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+    return srv
+
+
+SERVERS = _load_servers()
+
+
+def _cloud_ais():
+    """Avatares extra por cada modelo de un servidor de NUBE con API key cargada."""
+    pal = [(60, 180, 120), (220, 120, 60), (120, 120, 220), (200, 80, 140), (80, 200, 200)]
+    out, i = [], 0
+    for name, srv in SERVERS.items():
+        if name == "ollama" or not API_KEYS.get(name):
+            continue
+        for m in srv.get("models", []):
+            out.append({"name": m, "tag": "🔑", "color": pal[i % len(pal)],
+                        "model": m, "provider": name})
+            i += 1
+    return out
+
+
+def _post_json(url, payload, headers, timeout):
+    data = json.dumps(payload).encode("utf-8")
+    h = {"Content-Type": "application/json"}
+    h.update(headers)
+    rq = urllib.request.Request(url, data=data, headers=h)
+    with urllib.request.urlopen(rq, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def _llm_request(ai, sys_msg, user_msg):
+    """Enruta al SERVIDOR del modelo (Ollama local o nube con API key).
+    Devuelve el texto de respuesta o '' si falla / sin clave."""
+    model = ai.get("model", "")
+    provider = (ai.get("provider") or "ollama").lower()
+    srv = SERVERS.get(provider) or SERVERS.get("ollama")
+    stype = srv.get("type", "ollama")
+    timeout = ai_timeout(ai)
+    is_qwen = "qwen" in model.lower()
+    try:
+        if stype == "ollama":
+            payload = {"model": model, "stream": False,
+                       "messages": [{"role": "system", "content": sys_msg},
+                                    {"role": "user", "content": user_msg}],
+                       "options": {"num_predict": 1200 if is_qwen else 220,
+                                   "temperature": 0.8}}
+            out = _post_json(srv["url"], payload, {}, timeout)
+            return ((out.get("message") or {}).get("content")
+                    or (out.get("choices", [{}])[0].get("message", {}) or {}).get("content")
+                    or out.get("response") or "")
+        key = API_KEYS.get(provider, "")
+        if not key:
+            return ""
+        if stype == "openai":                  # OpenAI / Groq / Mistral / DeepSeek / OpenRouter
+            payload = {"model": model, "temperature": 0.8,
+                       "max_tokens": 1200 if is_qwen else 300,
+                       "messages": [{"role": "system", "content": sys_msg},
+                                    {"role": "user", "content": user_msg}]}
+            out = _post_json(srv["url"], payload, {"Authorization": "Bearer " + key}, timeout)
+            return (out.get("choices", [{}])[0].get("message", {}) or {}).get("content", "")
+        if stype == "anthropic":
+            payload = {"model": model, "max_tokens": 1200 if is_qwen else 400,
+                       "system": sys_msg,
+                       "messages": [{"role": "user", "content": user_msg}]}
+            out = _post_json(srv["url"], payload,
+                             {"x-api-key": key, "anthropic-version": "2023-06-01"}, timeout)
+            return "".join(b.get("text", "") for b in (out.get("content") or [])
+                           if b.get("type") == "text")
+        if stype == "google":
+            url = f"{srv['url']}/{model}:generateContent?key={key}"
+            payload = {"contents": [{"role": "user",
+                                     "parts": [{"text": sys_msg + "\n\n" + user_msg}]}]}
+            out = _post_json(url, payload, {}, timeout)
+            cands = out.get("candidates") or []
+            if cands:
+                parts = (cands[0].get("content") or {}).get("parts") or []
+                return "".join(p.get("text", "") for p in parts)
+            return ""
+    except Exception:
+        return ""
+    return ""
+
 
 def ollama_installed_models():
     """Consulta los modelos instalados en Ollama (equivale a 'ollama list').
@@ -2521,6 +2844,12 @@ if _INSTALLED:
     print(f"[Ollama] {len(_INSTALLED)} modelos detectados:", ", ".join(_INSTALLED))
 else:
     print("[Ollama] no se detectaron modelos (¿'ollama serve' activo?); uso los por defecto.")
+
+_CLOUD = _cloud_ais()                       # modelos de NUBE con API key cargada
+if _CLOUD:
+    AIS = AIS + _CLOUD
+    print(f"[Nube] {len(_CLOUD)} modelo(s) con API key añadidos:",
+          ", ".join(f"{a['provider']}:{a['model']}" for a in _CLOUD))
 
 # Modelos que dan voz al Mago Blanco y al Mago Negro (elegibles en la pantalla de IAs).
 BLANCO_AI = CLAUDE
@@ -2562,31 +2891,9 @@ def ask_companion_llm(companion, prompt, context=""):
     sys_msg = rol + " " + reglas
     user_msg = (f"[{rol}]\n[Estado del juego: {context}]\n"
                 f"{prompt}\nResponde en personaje, 1-2 frases, sin pedir contexto.")
-    # Qwen razona (thinking): necesita MUCHO más cupo de tokens.
-    is_qwen = "qwen" in model.lower()
-    payload = {
-        "model": model,
-        "messages": [{"role": "system", "content": sys_msg},
-                     {"role": "user", "content": user_msg}],
-        "stream": False,
-        "options": {"num_predict": 1200 if is_qwen else 220, "temperature": 0.8},
-    }
-    try:
-        data = json.dumps(payload).encode("utf-8")
-        rq = urllib.request.Request(OLLAMA_API, data=data,
-                                    headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(rq, timeout=ai_timeout(ai)) as r:
-            out = json.loads(r.read().decode("utf-8"))
-        # /api/chat -> {"message":{"content":...}}; compat OpenAI -> {"choices":[...]}
-        txt = ((out.get("message") or {}).get("content")
-               or (out.get("choices", [{}])[0].get("message", {}) or {}).get("content")
-               or out.get("response") or "")
-        txt = _strip_think(txt.strip())    # quita el razonamiento <think>...</think>
-        if not txt:
-            return chat_fallback(companion.get("elem"))
-        return txt
-    except Exception:
-        return chat_fallback(companion.get("elem"))
+    # Enruta al servidor del modelo (Ollama local o nube con API key) y limpia <think>.
+    txt = _strip_think((_llm_request(ai, sys_msg, user_msg) or "").strip())
+    return txt or chat_fallback(companion.get("elem"))
 
 
 class Chat:
@@ -3387,17 +3694,22 @@ def main_menu():
                 if idx == 0:
                     slot = choose_slot("Nueva partida — elige ranura")
                     if slot:
-                        play_game(slot, None)
+                        res = play_game(slot, None)
+                        while res == "dead":         # moriste -> recarga el último guardado
+                            res = play_game(slot, load_slot(slot))
                 elif idx == 1:
                     slot = load_menu()
                     if slot:
-                        play_game(slot, load_slot(slot))
+                        res = play_game(slot, load_slot(slot))
+                        while res == "dead":
+                            res = play_game(slot, load_slot(slot))
                 elif idx == 2:
                     options_menu()
                 elif idx == 3:
                     pygame.quit(); sys.exit()
         screen.fill((12, 12, 24))
-        draw_text(screen, "NEREA RPG", W // 2 - 90, 90, font_lg, GOLD)
+        _ttl = "EL VIAJE DEL MAGO"
+        draw_text(screen, _ttl, W // 2 - font_lg.size(_ttl)[0] // 2, 90, font_lg, GOLD)
         draw_text(screen, "Mago Gris y las seis magas", W // 2 - 130, 130, font_sm, DIM)
         for i, r in enumerate(rows):
             y = 200 + i * 48
@@ -3790,8 +4102,10 @@ def play_game(slot, saved):
         # nivel de REFERENCIA = el MAYOR nivel de TODO el grupo (no el principal).
         # Todo el escalado (jefes y enemigos) se mide sobre este, incluido el Negro.
         plvl = max(c["lvl"] for c in [gris] + roster + extra_allies)
-        # cantidad máxima de enemigos pequeños según tu grupo: 1->1, 2->3, 3+->5
-        mob_cap = 1 if len(party) <= 1 else 3 if len(party) == 2 else 5
+        # enemigos según el grupo TOTAL (incl. reservas): 1→1, 2-3→2, 4-5→3, 6→4, 7+→5
+        grp = len([gris] + roster + extra_allies)
+        mob_cap = (1 if grp <= 1 else 2 if grp <= 3 else 3 if grp <= 5
+                   else 4 if grp == 6 else 5)
 
         def mk(name, elem, hp, atk, df, spd, lvl):
             return scale_enemy(make_enemy(name, elem, hp, atk, df, spd), max(1, lvl))
@@ -3838,18 +4152,23 @@ def play_game(slot, saved):
         elif world_en.get("maga"):
             el = world_en["maga"]
             m = MAGA_BY_ELEM[el]
-            # la jefa SIEMPRE está de +1 a +3 niveles sobre ti (reto garantizado).
-            boss_lvl = plvl + random.randint(1, 3)
+            done = sum(world_done.values())     # cuántas magas ya liberaste
+            # la 1ª maga es SUAVE (+0..+1 sobre ti); el resto, reto garantizado (+1..+3)
+            boss_lvl = plvl + (random.randint(0, 1) if done == 0
+                               else random.randint(1, 3))
             boss = mk(m["name"] + " (poseída)", el, m["hp"] * 2 + 50,
                       m["atk"] + 6, m["df"] + 5, m["spd"] + 1, boss_lvl)
-            boss["maga"] = el                               # caster: 2-3 acciones + pociones
+            boss["maga"] = el                               # caster: pociones + acciones
+            boss["max_acts"] = 1 if done == 0 else 2        # 1ª maga: 1 turno; resto: hasta 2
             boss["powers"] = list(m["powers"]) + [          # poderes de la maga
                 p for req, p in LEVEL_POWERS.get(el, []) if req <= boss_lvl]
-            # poseída = MP FINITO (gasta maná en sus poderes) y la MITAD de pociones
+            # poseída = MP FINITO (gasta maná en sus poderes).
             boss["maxmp"] = boss["mp"] = max(40, m["mp"])
-            boss["pot_hp"] = boss["pot_mp"] = 3
+            # las 3 PRIMERAS magas NO usan objetos (pociones); las 3 SIGUIENTES sí
+            boss["pot_hp"] = boss["pot_mp"] = 0 if done < 3 else 3
             foes = [boss]
-            n_min = min(4, 2 + (len(party) - 1))    # más esbirros con grupo mayor
+            # esbirros: 0 con la 1ª maga, 1 con la 2ª, 2 con la 3ª... (se va sumando)
+            n_min = min(5, done)
             for ie in random.sample(WORLD_ORDER, n_min):
                 foes.append(mk("Acólito " + ELEM_NAME[ie], ie, 40, 12, 7, 8,
                                max(1, boss_lvl - 3)))
@@ -3861,7 +4180,7 @@ def play_game(slot, saved):
             pool = AMBIENT.get(WORLD_THEME.get(el, ""), [world_en["name"]])
             foes = []
             for _ in range(n):
-                lv = max(1, plvl + random.randint(-2, 1))   # tu nivel -2 .. +1
+                lv = max(1, plvl + random.randint(-3, 1))   # tu nivel -3 .. +1
                 foes.append(mk(random.choice(pool), el, 40, 12, 7, 7, lv))
             xp_base, gold_r = 9 * n, 12 * n
         else:
@@ -3870,7 +4189,7 @@ def play_game(slot, saved):
             pool = AMBIENT.get(WORLD_THEME.get(el, ""), [])
             foes = []
             for k in range(n):
-                lv = max(1, plvl + random.randint(-2, 1))   # niveles MEZCLADOS (-2..+1)
+                lv = max(1, plvl + random.randint(-3, 1))   # niveles MEZCLADOS (-3..+1)
                 kind = random.random()                      # personajes MEZCLADOS
                 if kind < 0.3:
                     foes.append(mk("Mago " + ELEM_NAME[el], el, 46, 12, 8, 6, lv))
@@ -3880,7 +4199,7 @@ def play_game(slot, saved):
                     foes.append(mk("Acólito " + ELEM_NAME[el], el, 28, 9, 5, 8, lv))
             if not any("Mago" in f["name"] or "Acólito" in f["name"] for f in foes):
                 foes[0] = mk("Acólito " + ELEM_NAME[el], el, 28, 9, 5, 8,
-                             max(1, plvl + random.randint(-2, 1)))   # al menos 1 secuaz
+                             max(1, plvl + random.randint(-3, 1)))   # al menos 1 secuaz
             xp_base, gold_r = 14 + 8 * n, 20 + 10 * n
         battle = Battle(party, foes, armor_def=eqbonus("Armadura", "df"),
                         atk_bonus=eqbonus("Arma", "atk"), pow_bonus=eqbonus("Foco", "pow"))
@@ -3971,10 +4290,10 @@ def play_game(slot, saved):
                 continue
             # ---- joystick Xbox -> teclas equivalentes ----
             if e.type == pygame.JOYBUTTONDOWN:
-                # A=confirmar/hablar B=atrás X=estado(C) Y=confirmar Start=bolsa
+                # A=confirmar/hablar B=atrás X=estado(C) Y=bolsa Start=PAUSA
                 # LB/LT=pestaña◄  RB/RT=pestaña►  Back/Select=guardar(G)
                 kb = {0: pygame.K_e, 1: pygame.K_q, 2: pygame.K_c,
-                      3: pygame.K_e, 7: pygame.K_b, 6: pygame.K_g,
+                      3: pygame.K_b, 7: pygame.K_ESCAPE, 6: pygame.K_g,
                       4: pygame.K_LEFT, 5: pygame.K_RIGHT}.get(e.button)
                 if kb is not None:
                     pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=kb))
@@ -4125,14 +4444,16 @@ def play_game(slot, saved):
                             state = "dialog"
                         else:
                             state = "overworld"
-                    else:                       # DERROTA -> despiertas en el HALL central
-                        for c in party:         # te recuperas en parte (no game over)
+                    else:                       # DERROTA -> vuelves al ÚLTIMO GUARDADO
+                        if load_slot(slot):     # hay guardado -> el menú lo recarga
+                            return "dead"
+                        for c in party:         # nunca guardaste: revives en el hall
                             c["alive"] = True
                             c["hp"] = max(1, c["maxhp"] // 2)
                             c["mp"] = c["maxmp"]
                         goto("hub", get_stage("hub")["spawn"])
-                        toast = "Caíste en combate... despiertas en el Nexo del Gris."
-                        toast_t = 2400
+                        toast = "Caíste... aún no guardabas. Despiertas en el Nexo del Gris."
+                        toast_t = 2600
                         state = "overworld"
             elif state == "shop":
                 if e.type == pygame.KEYDOWN:
@@ -4423,7 +4744,12 @@ def play_game(slot, saved):
                             ci = next((i for i, p in enumerate(cps)
                                        if p == (fx, fy)), None)
                             if men and not chat.busy:
-                                if men.get("maga"):
+                                men["talks"] = men.get("talks", 0) + 1
+                                # maga: 3ª charla -> combate; Negro/Blanco: 2ª charla -> combate
+                                if men["talks"] >= (3 if men.get("maga") else 2):
+                                    last_enemy = men
+                                    start_battle(men)
+                                elif men.get("maga"):
                                     el = men["maga"]
                                     poss = {"name": MAGA_BY_ELEM[el]["name"], "elem": el,
                                             "ai": AI_OF[el], "lvl": men.get("lvl", 1)}
@@ -4537,10 +4863,12 @@ def play_game(slot, saved):
                     hit = next((en for en in enemies
                                 if en["alive"] and (en["x"], en["y"]) == (nx, ny)), None)
                     occ = any((nx, ny) == (tk["x"], tk["y"]) for tk in talkers)
-                    if hit and hit.get("final") and not negro_done:
-                        toast = "Primero derrota al Mago Negro"; toast_t = 1500
-                        move_cd = 200
-                    elif hit:
+                    is_boss = bool(hit and (hit.get("maga") or hit.get("prologue")
+                                            or hit.get("subfinal") or hit.get("final")))
+                    if is_boss:                       # JEFES: no peleas por contacto -> háblale
+                        toast = "Háblale (E) para enfrentarlo"; toast_t = 1200
+                        move_cd = 150
+                    elif hit:                         # enemigo simple -> combate por contacto
                         last_enemy = hit
                         move_cd = 250
                         start_battle(hit)
@@ -4690,35 +5018,41 @@ def play_game(slot, saved):
                                      1, border_radius=4)
                     draw_text(screen, label, lx, ly, font_xs, WHITE)
             bob = -3 if (bob_t // 200) % 2 == 0 else 0
-            for cst in rt.get("chests", []):       # tesoros ocultos
+            for cst in rt.get("chests", []):       # tesoros ocultos (fondo)
                 if not cst["got"]:
                     draw_chest(cst["x"], cst["y"], camx, cdy)
-            for tk in talkers:
-                if tk.get("angel"):                # tamaño normal, con alas
-                    draw_actor(tk["color"], tk["x"], tk["y"], bob, camx, cdy,
-                               wings=True)
-                else:
-                    draw_actor(tk["color"], tk["x"], tk["y"], bob, camx, cdy)
-            for en in enemies:
-                if en["alive"]:
-                    if en.get("throne"):           # aguarda sentado en su trono
-                        if en.get("final"):        # Mago Blanco: trono colosal
-                            draw_throne_big(en["x"], en["y"], camx, cdy)
-                        else:
-                            draw_throne(en["x"], en["y"], camx, cdy)
-                    if en.get("dragon"):           # el dragón es más grande (con alas)
-                        draw_actor(en["color"], en["x"], en["y"], bob, camx, cdy,
-                                   scale=2.2, wings=True)
-                    elif en.get("final"):          # Mago Blanco final: imponente
-                        draw_actor(en["color"], en["x"], en["y"], bob, camx, cdy,
-                                   scale=1.4)
+            for en in enemies:                     # tronos: fondo de los jefes
+                if en["alive"] and en.get("throne"):
+                    if en.get("final"):            # Mago Blanco: trono colosal
+                        draw_throne_big(en["x"], en["y"], camx, cdy)
                     else:
-                        draw_actor(en["color"], en["x"], en["y"], bob, camx, cdy)
+                        draw_throne(en["x"], en["y"], camx, cdy)
+            # ACTORES ordenados por Y: el de más ABAJO se dibuja ENCIMA del de arriba
+            drawables = []
+            for tk in talkers:
+                drawables.append((tk["y"], (lambda t=tk: draw_actor(
+                    t["color"], t["x"], t["y"], bob, camx, cdy,
+                    wings=t.get("angel", False)))))
+            for en in enemies:
+                if not en["alive"]:
+                    continue
+                if en.get("dragon"):               # el dragón es más grande (con alas)
+                    drawables.append((en["y"], (lambda e=en: draw_actor(
+                        e["color"], e["x"], e["y"], bob, camx, cdy,
+                        scale=2.2, wings=True))))
+                else:
+                    drawables.append((en["y"], (lambda e=en: draw_actor(
+                        e["color"], e["x"], e["y"], bob, camx, cdy))))
             comps = companions()
             for i in range(min(len(comps), len(comp_vis))):   # magas con glide suave
                 cvx, cvy = comp_vis[i]
-                draw_actor(comps[i]["color"], cvx, cvy, bob, camx, cdy)
-            draw_actor(party[0]["color"], vis_x, vis_y, 0, camx, cdy, face=facing)
+                drawables.append((cvy, (lambda c=comps[i], x=cvx, y=cvy: draw_actor(
+                    c["color"], x, y, bob, camx, cdy))))
+            drawables.append((vis_y, (lambda: draw_actor(
+                party[0]["color"], vis_x, vis_y, 0, camx, cdy, face=facing))))
+            drawables.sort(key=lambda d: d[0])     # menor Y (arriba) primero -> detrás
+            for _, fn in drawables:
+                fn()
 
             # HUD
             pygame.draw.rect(screen, (10, 12, 20), (0, 0, W, HUD_H))
