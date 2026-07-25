@@ -1,12 +1,13 @@
 """rpg.py - Nerea RPG (prototipo estilo Chrono Trigger: overworld + diálogos + combate por turnos)"""
 
 GAME_META = {
-    "name":  "Nerea RPG",
+    "name":  "Nerea RPG Ollama",
     "desc":  "RPG 2D por turnos. Elige hasta 3 héroes, explora, habla con NPCs y combate.",
     "ctrl":  "Flechas/WASD: mover | E/Enter: hablar/avanzar | ESC: salir",
     "color": (120, 80, 200),
     "order": 20,
 }
+
 
 import pygame
 import sys
@@ -21,6 +22,10 @@ import base64
 import hashlib
 import hmac
 import urllib.request
+try:                                    # mini-juegos por mundo (archivo APARTE)
+    import minigames as MINIGAMES       # ver minigames.py junto a rpg.py
+except ImportError:
+    MINIGAMES = None
 
 pygame.init()
 try:
@@ -106,6 +111,67 @@ def fade_out(steps=9, delay=7):
     screen.fill((0, 0, 0))
     present()
 
+
+def iris_out(cx=None, cy=None, steps=14, delay=11):
+    """Transición IRIS (estilo Zelda): un círculo se CIERRA hacia negro,
+    centrado en (cx, cy) — normalmente el jugador. Bloqueante."""
+    snap = screen.copy()
+    cx = W // 2 if cx is None else int(cx)
+    cy = H // 2 if cy is None else int(cy)
+    maxr = int(math.hypot(max(cx, W - cx), max(cy, H - cy))) + 8
+    ov = pygame.Surface((W, H))
+    ov.set_colorkey((255, 0, 255))             # el círculo magenta queda transparente
+    for s in range(steps + 1):
+        r = int(maxr * (1 - s / steps) ** 1.6)
+        screen.blit(snap, (0, 0))
+        ov.fill((0, 0, 0))
+        if r > 0:
+            pygame.draw.circle(ov, (255, 0, 255), (cx, cy), r)
+        screen.blit(ov, (0, 0))
+        present()
+        pygame.time.delay(delay)
+    screen.fill((0, 0, 0))
+    present()
+
+
+def battle_swirl(steps=18, delay=12):
+    """Transición a BATALLA (estilo Final Fantasy): la pantalla gira y se
+    encoge en espiral hacia negro. Bloqueante."""
+    sfx("swirl")
+    snap = screen.copy()
+    ov = pygame.Surface((W, H))
+    ov.fill((0, 0, 0))
+    for s in range(1, steps + 1):
+        t = s / steps
+        img = pygame.transform.rotozoom(snap, 50 * t * t,
+                                        max(0.04, 1 - 0.96 * t * t))
+        screen.fill((0, 0, 0))
+        screen.blit(img, img.get_rect(center=(W // 2, H // 2)))
+        ov.set_alpha(int(170 * t))
+        screen.blit(ov, (0, 0))
+        present()
+        pygame.time.delay(delay)
+    screen.fill((0, 0, 0))
+    present()
+
+
+def wipe_out(direction="right", steps=12, delay=9):
+    """Barrido a negro: una CORTINA cruza la pantalla en la dirección del
+    viaje (transición entre ETAPAS del mismo mundo). Bloqueante."""
+    snap = screen.copy()
+    for s in range(1, steps + 1):
+        p = (s / steps) ** 1.3
+        screen.blit(snap, (0, 0))
+        wpx = int(W * p)
+        if direction == "right":               # avanzas -> cortina izq. a der.
+            pygame.draw.rect(screen, (0, 0, 0), (0, 0, wpx, H))
+        else:                                  # retrocedes -> der. a izq.
+            pygame.draw.rect(screen, (0, 0, 0), (W - wpx, 0, wpx, H))
+        present()
+        pygame.time.delay(delay)
+    screen.fill((0, 0, 0))
+    present()
+
 font_lg = pygame.font.SysFont("Consolas", 22, bold=True)
 font_md = pygame.font.SysFont("Consolas", 16, bold=True)
 font_sm = pygame.font.SysFont("Consolas", 13)
@@ -168,6 +234,11 @@ def draw_menu_panel(title, lines, idx, footer=""):
         draw_text(screen, footer, box.x + 16, box.bottom - 20, font_xs, DIM)
 
 
+def _list_window(idx, n, maxvis):
+    """Inicio de la ventana visible de una lista con scroll (mantiene idx a la vista)."""
+    return max(0, min(idx - maxvis // 2, n - maxvis)) if n > maxvis else 0
+
+
 def wrap(text, font, maxw):
     words, lines, cur = text.split(" "), [], ""
     for w in words:
@@ -180,6 +251,104 @@ def wrap(text, font, maxw):
     if cur:
         lines.append(cur)
     return lines
+
+
+def _mg_ctx():
+    """Referencias que rpg.py PRESTA a minigames.py (pantalla, fuentes, sonido).
+    Así el módulo de mini-juegos no importa nada de rpg.py (sin ciclos)."""
+    return {"screen": screen, "present": present, "clock": clock, "FPS": FPS,
+            "draw_text": draw_text, "wrap": wrap,
+            "font_xs": font_xs, "font_sm": font_sm,
+            "font_md": font_md, "font_lg": font_lg,
+            "WHITE": WHITE, "GOLD": GOLD, "DIM": DIM,
+            "W": W, "H": H, "sfx": sfx}
+
+
+# ============================================================
+#  EFECTOS DE SONIDO (sintetizados por código, sin archivos)
+# ============================================================
+import array as _array
+
+_SFX = {}
+
+
+def _synth(segs, vol=0.35, noise=0.0):
+    """Sintetiza un sonido a partir de segmentos [(freq_ini, freq_fin, dur_s, onda)].
+    onda: 'sq' cuadrada (chiptune), 'si' seno (suave), 'sw' sierra, 'ns' ruido."""
+    mix = pygame.mixer.get_init()
+    if not mix:
+        return None
+    rate, _fmt, chans = mix
+    buf = _array.array("h")
+    for f0, f1, dur, wave in segs:
+        n = max(1, int(rate * dur))
+        ph = 0.0
+        for i in range(n):
+            t = i / n
+            ph += (f0 + (f1 - f0) * t) / rate
+            if wave == "ns":
+                v = random.uniform(-1, 1)
+            elif wave == "si":
+                v = math.sin(2 * math.pi * ph)
+            elif wave == "sw":
+                v = 2 * (ph % 1) - 1
+            else:                                  # cuadrada
+                v = 1.0 if (ph % 1) < 0.5 else -1.0
+            if noise:
+                v = v * (1 - noise) + random.uniform(-1, 1) * noise
+            s = int(max(-1.0, min(1.0, v * (1 - t))) * vol * 32767)
+            for _ in range(chans):
+                buf.append(s)
+    try:
+        return pygame.mixer.Sound(buffer=buf.tobytes())
+    except Exception:
+        return None
+
+
+def _build_sfx():
+    S = _synth
+    _SFX.update({
+        "menu":    S([(880, 880, .035, "sq")], vol=.14),
+        "confirm": S([(660, 660, .05, "sq"), (990, 990, .07, "sq")], vol=.18),
+        "cancel":  S([(500, 300, .09, "sq")], vol=.16),
+        "hit":     S([(220, 90, .10, "ns")], vol=.4),
+        "crit":    S([(200, 80, .12, "ns"), (1300, 900, .09, "sq")], vol=.45),
+        "miss":    S([(700, 200, .12, "ns")], vol=.14),
+        "heal":    S([(523, 523, .07, "si"), (659, 659, .07, "si"),
+                      (880, 880, .12, "si")], vol=.3),
+        "power":   S([(300, 1200, .18, "sw")], vol=.28),
+        "item":    S([(700, 1000, .06, "si"), (1000, 700, .06, "si")], vol=.25),
+        "guard":   S([(180, 140, .08, "sq")], vol=.22),
+        "flee":    S([(900, 200, .20, "ns")], vol=.2),
+        "swirl":   S([(1400, 90, .45, "sw")], vol=.18, noise=.35),
+        "gold":    S([(1320, 1320, .05, "si"), (1760, 1760, .10, "si")], vol=.28),
+        "win":     S([(660, 660, .10, "sq"), (784, 784, .10, "sq"),
+                      (990, 990, .22, "sq")], vol=.28),
+        "lose":    S([(400, 400, .16, "sq"), (330, 330, .16, "sq"),
+                      (240, 220, .30, "sq")], vol=.28),
+        "levelup": S([(523, 523, .09, "sq"), (659, 659, .09, "sq"),
+                      (784, 784, .09, "sq"), (1046, 1046, .24, "sq")], vol=.28),
+        "quemado":    S([(300, 200, .22, "ns")], vol=.22),
+        "congelado":  S([(1800, 2400, .14, "si")], vol=.2),
+        "paralizado": S([(60, 60, .05, "sq"), (2000, 500, .10, "sw")],
+                        vol=.28, noise=.4),
+        "envenenado": S([(420, 300, .10, "si"), (300, 210, .13, "si")], vol=.2),
+        "cegado":     S([(600, 180, .18, "ns")], vol=.18, noise=.5),
+    })
+
+
+def sfx(name):
+    """Reproduce un efecto sintetizado (respeta la opción de sonido)."""
+    if not OPTS.get("sound", True):
+        return
+    if not _SFX:
+        _build_sfx()                       # se generan una sola vez, al primer uso
+    s = _SFX.get(name)
+    if s:
+        try:
+            s.play()
+        except Exception:
+            pass
 
 
 # ============================================================
@@ -214,6 +383,26 @@ ELEM_COLOR = {"fuego": (220, 70, 50), "planta": (70, 180, 90),
               "neutro": (150, 150, 160)}
 SUPER, WEAK = 1.3, 0.6   # multiplicadores de efectividad
 COLORS6 = {"fuego", "planta", "agua", "tierra", "rayo", "hielo"}
+
+# --- ESTADOS ALTERADOS (por elemento del ataque) ---
+#  fuego -> QUEMADO:    pierde 6% de vida máx al inicio de su turno (3 turnos)
+#  hielo -> CONGELADO:  50% de perder el turno (2 turnos)
+#  rayo  -> PARALIZADO: 35% de perder el turno (3 turnos)
+#  planta-> ENVENENADO: pierde 5% de vida máx al inicio de su turno (4 turnos)
+#  tierra-> CEGADO:     -35 de precisión (falla más golpes) (3 turnos)
+# Se aplican con probabilidad al hacer daño elemental (más si es súper efectivo).
+# Los jefes resisten (mitad de probabilidad y un turno menos). Los poderes de
+# curación y el Elixir limpian los estados. Todo se limpia al acabar el combate.
+STATUS_OF_ELEM = {"fuego": "quemado", "hielo": "congelado", "rayo": "paralizado",
+                  "planta": "envenenado", "tierra": "cegado"}
+STATUS_INFO = {
+    "quemado":    {"abbr": "QUE", "col": (255, 130, 60),  "turns": 3},
+    "congelado":  {"abbr": "CON", "col": (150, 205, 255), "turns": 2},
+    "paralizado": {"abbr": "PAR", "col": (245, 225, 90),  "turns": 3},
+    "envenenado": {"abbr": "VEN", "col": (185, 110, 210), "turns": 4},
+    "cegado":     {"abbr": "CEG", "col": (205, 175, 115), "turns": 3},
+}
+STATUS_CHANCE, STATUS_CHANCE_SUPER = 0.20, 0.35   # prob. normal / súper efectivo
 
 
 def effectiveness(a, d):
@@ -335,6 +524,9 @@ ITEMS = [
     {"name": "Super Éter", "qty": 0, "kind": "mp", "amt": 70, "price": 90},
     {"name": "Elixir", "qty": 0, "kind": "full", "amt": 0, "price": 350},
     {"name": "Pluma Fénix", "qty": 1, "kind": "revive", "amt": 0, "price": 150},
+    # Remedio: cura TODOS los estados alterados (quemado/congelado/paralizado).
+    # Va al FINAL de la lista para no romper los guardados (se guardan por índice).
+    {"name": "Remedio", "qty": 2, "kind": "cure", "amt": 0, "price": 40},
 ]
 
 # Objetos potentes que SOLO aparecen (tienda/cofres/drops) cuando algún personaje
@@ -401,9 +593,9 @@ ACC_BY_NAME = {a["name"]: (el, a) for el, lst in ACCESSORIES.items() for a in ls
 # reinos anteriores (backtracking). Cada reino stockea accesorios de OTRO elemento
 # (ej.: en Fuego venden defensa de Tierra). Los accesorios exigen nivel.
 SHOP_PLAN = {
-    "hub":    {"items": ["Poción", "Éter", "Pluma Fénix"],
+    "hub":    {"items": ["Poción", "Éter", "Pluma Fénix", "Remedio"],
                "equip": [("Arma", 0), ("Armadura", 0), ("Foco", 0)], "acc": ["neutro"]},
-    "fuego":  {"items": ["Poción", "Super Poción"],
+    "fuego":  {"items": ["Poción", "Super Poción", "Remedio"],
                "equip": [("Foco", 0)], "acc": ["tierra"]},
     "planta": {"items": ["Poción", "Éter"],
                "equip": [("Arma", 1)], "acc": ["fuego"]},
@@ -411,11 +603,11 @@ SHOP_PLAN = {
                "equip": [("Armadura", 1)], "acc": ["rayo"]},
     "tierra": {"items": ["Poción", "Pluma Fénix"],
                "equip": [("Foco", 1)], "acc": ["planta"]},
-    "rayo":   {"items": ["Super Poción", "Éter"],
+    "rayo":   {"items": ["Super Poción", "Éter", "Remedio"],
                "equip": [("Arma", 2)], "acc": ["hielo"]},
-    "hielo":  {"items": ["Super Éter", "Mega Poción"],
+    "hielo":  {"items": ["Super Éter", "Mega Poción", "Remedio"],
                "equip": [("Armadura", 2)], "acc": ["agua"]},
-    "final":  {"items": ["Mega Poción", "Super Éter", "Elixir", "Pluma Fénix"],
+    "final":  {"items": ["Mega Poción", "Super Éter", "Elixir", "Pluma Fénix", "Remedio"],
                "equip": [("Arma", 2), ("Foco", 2), ("Armadura", 2)],
                "acc": ["neutro", "fuego", "agua", "hielo"]},
 }
@@ -448,7 +640,7 @@ def make_combatant(h):
         "atk": h["atk"], "df": h["df"], "spd": h["spd"],
         "pre": h.get("pre", 90), "agu": h.get("agu", 10),
         "powers": list(h["powers"]), "guard": False, "alive": True, "side": "hero",
-        "lvl": 1, "xp": 0, "wear": None,
+        "lvl": 1, "xp": 0, "wear": None, "status": {},
     }
 
 
@@ -458,6 +650,7 @@ def make_enemy(name, elem, hp, atk, df, spd, lvl=1):
         "hp": hp, "maxhp": hp, "mp": 0, "maxmp": 0,
         "atk": atk, "df": df, "spd": spd, "pre": 84, "agu": 8,
         "powers": [], "guard": False, "alive": True, "side": "enemy", "lvl": lvl,
+        "status": {},
     }
 
 
@@ -499,8 +692,14 @@ AOE_POWERS = {"Infierno", "Tempestad", "Cero Absoluto", "Cataclismo Pétreo",
 
 
 # ---- Sistema de niveles (XP) ----
+# REBALANCEO: curva ligeramente CUADRÁTICA. Antes era lineal (30 + 25/nivel) y
+# a niveles altos se subía demasiado rápido (los enemigos dan +14% XP por nivel).
+# Ajusta XP_LIN / XP_QUAD para afinar: lineal = ritmo temprano, cuadrático = tardío.
+XP_LIN, XP_QUAD = 22, 2
+
+
 def xp_to_next(lvl):
-    return 30 + (lvl - 1) * 25
+    return 30 + (lvl - 1) * XP_LIN + (lvl - 1) ** 2 * XP_QUAD
 
 
 def gain_xp(c, amount):
@@ -512,8 +711,8 @@ def gain_xp(c, amount):
         c["xp"] -= xp_to_next(c["lvl"])
         c["lvl"] += 1
         gains = {"HP": 8, "MP": 3, "ATK": 2, "DEF": 1, "VEL": 0, "AGU": 1, "PRE": 0}
-        c["maxhp"] += 8; c["hp"] += 8
-        c["maxmp"] += 3; c["mp"] += 3
+        c["maxhp"] += 8; c["maxmp"] += 3
+        c["hp"] = c["maxhp"]; c["mp"] = c["maxmp"]   # subir de nivel: cura TOTAL de HP y MP
         c["atk"] += 2; c["df"] += 1
         c["agu"] = c.get("agu", 10) + 1
         if c["lvl"] % 2 == 0:
@@ -545,10 +744,14 @@ ENEMY_SKILLS = {
 
 
 def scale_enemy(e, lvl):
-    """Escala TODAS las stats del enemigo a su nivel y le da un ataque mejorado."""
-    f = 1 + 0.11 * (lvl - 1)
-    e["maxhp"] = int(e["maxhp"] * f); e["hp"] = e["maxhp"]
-    e["atk"] = int(e["atk"] * f); e["df"] = int(e["df"] * f)
+    """Escala TODAS las stats del enemigo a su nivel y le da un ataque mejorado.
+    REBALANCEO: la vida crece un poco MÁS (peleas menos triviales) y el ataque y
+    la defensa un poco MENOS (menos picos de daño injustos a nivel alto)."""
+    fhp = 1 + 0.12 * (lvl - 1)          # antes: 0.11 para todo
+    fatk = 1 + 0.09 * (lvl - 1)
+    fdf = 1 + 0.08 * (lvl - 1)
+    e["maxhp"] = int(e["maxhp"] * fhp); e["hp"] = e["maxhp"]
+    e["atk"] = int(e["atk"] * fatk); e["df"] = int(e["df"] * fdf)
     e["spd"] = int(e["spd"] * (1 + 0.04 * (lvl - 1)))
     e["pre"] = min(200, e.get("pre", 84) + lvl // 3)
     e["agu"] = e.get("agu", 8) + lvl // 4
@@ -565,7 +768,7 @@ def scale_enemy(e, lvl):
 #  ETAPAS / MAPAS
 # ============================================================
 # Tipos de tile: 0 suelo, 1 pared, 2 árbol, 3 agua, 4 puerta (transición)
-TILE_WALK = {0, 4}            # suelo y puerta son transitables
+TILE_WALK = {0, 4, 2}         # suelo, puerta y COPA de árbol (kind 2; pasas por detrás)
 
 # Tema visual por etapa (identidad de cada mapa)
 THEMES = {
@@ -636,6 +839,59 @@ WORLD_DECOR = {"fuego": [(6, 0.05)],
                "tierra": [(6, 0.08)],
                "rayo": [(6, 0.04)],
                "hielo": [(3, 0.08), (6, 0.03)]}
+
+# PARTÍCULAS AMBIENTALES por tema del mapa (se dibujan sobre el mundo):
+# vx/vy en píxeles por segundo; kind define la forma y el movimiento extra.
+AMBIENT_FX = {
+    "volcan":   {"n": 20, "cols": [(255, 150, 60), (255, 200, 90), (255, 110, 50)],
+                 "vx": (-8, 8),   "vy": (-30, -12), "kind": "ember"},
+    "bosque":   {"n": 14, "cols": [(120, 170, 80), (160, 190, 90), (190, 160, 80)],
+                 "vx": (-20, -6), "vy": (12, 26),   "kind": "leaf"},
+    "mar":      {"n": 12, "cols": [(200, 230, 255), (150, 210, 245)],
+                 "vx": (-5, 5),   "vy": (-18, -7),  "kind": "bubble"},
+    "canon":    {"n": 14, "cols": [(205, 175, 125), (180, 150, 105)],
+                 "vx": (22, 46),  "vy": (-4, 4),    "kind": "dust"},
+    "tormenta": {"n": 10, "cols": [(245, 235, 130), (205, 205, 255)],
+                 "vx": (-10, 10), "vy": (14, 30),   "kind": "spark"},
+    "pico":     {"n": 24, "cols": [(240, 245, 255), (215, 228, 245)],
+                 "vx": (-12, 12), "vy": (12, 26),   "kind": "snow"},
+}
+
+
+def amb_make(cfg):
+    """Crea una partícula ambiental en un punto aleatorio del área de juego."""
+    return {"x": random.uniform(0, W), "y": random.uniform(HUD_H, H),
+            "vx": random.uniform(*cfg["vx"]), "vy": random.uniform(*cfg["vy"]),
+            "col": random.choice(cfg["cols"]), "ph": random.uniform(0, 6.28),
+            "r": random.randint(1, 2)}
+
+
+def amb_step_draw(parts, kind, dt):
+    """Mueve y dibuja las partículas ambientales (con envoltura de pantalla)."""
+    t = pygame.time.get_ticks()
+    for p in parts:
+        p["x"] += p["vx"] * dt / 1000.0
+        p["y"] += p["vy"] * dt / 1000.0
+        if kind in ("snow", "leaf"):           # vaivén al caer
+            p["x"] += math.sin(t / 480.0 + p["ph"]) * 0.5
+        if p["y"] > H + 4:
+            p["y"] = HUD_H - 3; p["x"] = random.uniform(0, W)
+        elif p["y"] < HUD_H - 4:
+            p["y"] = H + 3; p["x"] = random.uniform(0, W)
+        if p["x"] > W + 4:
+            p["x"] = -3
+        elif p["x"] < -4:
+            p["x"] = W + 3
+        xi, yi = int(p["x"]), int(p["y"])
+        if kind == "leaf":                     # hojita ovalada
+            pygame.draw.ellipse(screen, p["col"], (xi - 2, yi - 1, 5, 3))
+        elif kind == "spark":                  # chispa que PARPADEA
+            if (t // 130 + int(p["ph"] * 10)) % 4:
+                pygame.draw.line(screen, p["col"], (xi, yi - 2), (xi, yi + 2), 1)
+        elif kind == "bubble":                 # burbuja hueca
+            pygame.draw.circle(screen, p["col"], (xi, yi), p["r"] + 1, 1)
+        else:                                  # brasa / polvo / copo: punto
+            pygame.draw.circle(screen, p["col"], (xi, yi), p["r"])
 
 # Enemigos de AMBIENTE por mundo (criaturas, no magos). Mismo elemento del mundo.
 AMBIENT = {
@@ -713,6 +969,10 @@ ORDER_LORE = [
     "devuelva lo que el Mago Negro nos arrebató.",
     "Dicen que hace falta un mago sin color para romper el sello del Mago Negro. "
     "Uno gris, como tú. Quizá la profecía hablaba de este día.",
+    "Mi abuela contaba que los Dos Triángulos eran HERMANOS: la luz de día y la "
+    "sombra que nos daba el descanso. Nadie recuerda cuándo se rompió eso.",
+    "Antes las seis magas se sentaban en un Consejo del Color junto a los dos "
+    "triángulos, y nadie reinaba solo. Qué viejos me suenan esos tiempos.",
 ]
 # Charla de NPCs (NO magas). Variada y ÚNICA por reino+etapa: vida cotidiana,
 # rumores, pistas y PRESAGIOS sobre el verdadero villano. Se reparten sin repetir.
@@ -763,10 +1023,70 @@ NPC_DOUBT = [
     "El Orden promete paz. Yo solo veo cadenas pintadas de blanco.",
     "Recé al triángulo de arriba toda mi vida. ¿Y si rezaba al amo equivocado?",
     "No todos los monstruos rugen; algunos bendicen.",
+    "¿Quién escribió la profecía del mago sin color? Nadie ha visto ese libro. "
+    "Las profecías de verdad no llegan tan a tiempo.",
+    "Seis magas fuera, un tirano odiado... ¿y toda la fe del mundo para UNO? "
+    "Qué cómoda esta guerra para el triángulo de arriba.",
 ]
 
+# ============================================================
+#  MISIONES SECUNDARIAS (una por reino)
+#  El NPC aparece en la PRIMERA etapa del reino con "!" sobre la cabeza
+#  ("?" mientras la misión está activa). Tipos:
+#    - "caza":    derrota N enemigos normales de ese reino.
+#    - "entrega": entrégale N unidades de un objeto de ITEMS.
+#  Estado por partida (se guarda en el slot):
+#    quest_st[reino] = {"st": 0 sin aceptar / 1 activa / 2 cumplida, "n": caza}
+# ============================================================
+SIDE_QUESTS = {
+    "fuego":  {"npc": "Herrera", "type": "caza", "goal": 3,
+               "ask": ("Los acólitos me roban el carbón y la forja se apaga. "
+                       "Derrota a 3 enemigos de este reino y te forjaré algo digno."),
+               "wip": "Aún rondan ladrones de carbón. Llevas {n} de {goal}.",
+               "turn": "¡La forja ruge de nuevo! Toma, recién salido del yunque.",
+               "done": "Cada chispa de mi forja lleva tu nombre, Gris.",
+               "reward": {"gold": 150, "item": "Super Poción"}},
+    "planta": {"npc": "Curandera", "type": "entrega", "item": "Poción", "goal": 2,
+               "ask": ("Mis hierbas se marchitaron con la sombra. Tráeme 2 Pociones "
+                       "para destilar mis remedios y te lo compensaré."),
+               "wip": "Necesito 2 Pociones y solo veo {n}. Te espero.",
+               "turn": "Con esto salvaré la botica entera. ¡Gracias, Gris!",
+               "done": "La botica huele a vida otra vez gracias a ti.",
+               "reward": {"gold": 180, "item": "Super Éter"}},
+    "agua":   {"npc": "Pescador", "type": "caza", "goal": 3,
+               "ask": ("Las criaturas de la sombra espantan a los peces y mis redes "
+                       "salen vacías. Vence a 3 de ellas y compartiré mi tesoro."),
+               "wip": "El mar sigue inquieto. Llevas {n} de {goal}.",
+               "turn": "¡Los bancos de peces regresan! Esto lo pescó mi abuelo; es tuyo.",
+               "done": "Cada marea buena te la debo a ti, mago.",
+               "reward": {"gold": 220, "item": "Pluma Fénix"}},
+    "tierra": {"npc": "Minero", "type": "caza", "goal": 4,
+               "ask": ("Los túneles están tomados y no puedo bajar a la veta. "
+                       "Limpia 4 enemigos del reino y habrá recompensa minera."),
+               "wip": "Los túneles siguen tomados. Llevas {n} de {goal}.",
+               "turn": "¡Veta despejada! Esto lo encontré a cien metros; brilla como tú.",
+               "done": "El pico canta de nuevo en la mina, Gris.",
+               "reward": {"gold": 260, "item": "Mega Poción"}},
+    "rayo":   {"npc": "Farolera", "type": "entrega", "item": "Remedio", "goal": 1,
+               "ask": ("Mi hermano quedó paralizado por un acólito y no despierta. "
+                       "Tráeme 1 Remedio y las farolas de la Cima brillarán por ti."),
+               "wip": "Sigo esperando ese Remedio... Mi hermano resiste.",
+               "turn": "¡Despierta, hermano! No sé cómo pagarte... bueno, sí lo sé.",
+               "done": "Mi hermano enciende farolas de nuevo. Míralas brillar.",
+               "reward": {"gold": 300, "item": "Super Éter"}},
+    "hielo":  {"npc": "Montañista", "type": "caza", "goal": 4,
+               "ask": ("La ruta a la cumbre está plagada de sombras y nadie sube. "
+                       "Despeja 4 enemigos y te daré lo que guardo para la cima."),
+               "wip": "La ruta sigue peligrosa. Llevas {n} de {goal}.",
+               "turn": "¡Ruta libre! Guardaba esto para la cumbre, pero tú la mereces más.",
+               "done": "Desde la cumbre se ve tu camino, Gris. Es hermoso.",
+               "reward": {"gold": 350, "item": "Elixir"}},
+}
 
-# Finales múltiples: uno por maga (la que MÁS actuó contigo en combate).
+
+
+# Finales múltiples: uno por maga (la de MAYOR afinidad según tus decisiones
+# al liberarlas; empates los resuelve last_bond, el último vínculo elegido).
 ENDINGS = {
     "fuego": ["Pyra fue tu llama más fiel en cada batalla.",
               "Juntos forjáis una era donde el fuego calienta, no consume.",
@@ -818,6 +1138,27 @@ RESCUE_LINES = {
     "hielo": ("La calma regresa a mi escarcha. Gracias por derretir mi prisión.",
               "Gélida: Mantendré la cabeza fría por los dos. Estoy contigo."),
 }
+
+# VISIONES DEL GRIS: tras liberar a cada maga (1ª..6ª), el Gris recibe un
+# fragmento de la verdad. Van revelando poco a poco el giro de la historia:
+# el Mago Negro es una víctima; el verdadero titiritero es el Mago Blanco.
+VISIONS = [
+    "Al romperse el hechizo, una imagen te atraviesa: hilos de luz blanca "
+    "moviendo los brazos del Mago Negro como a un títere. La visión se "
+    "desvanece antes de que puedas ver quién sostiene los hilos.",
+    "Otra visión: el Mago Negro, joven, llorando ante un tribunal de túnicas "
+    "blancas. 'Injusticia', susurra el recuerdo. ¿Quién lo condenó... y por qué?",
+    "Ves una torre blanca sobre las nubes y una pluma escribiendo: '...y un "
+    "mago sin color romperá el sello'. La tinta aún está fresca. Las "
+    "profecías no se escriben: se recuerdan. Esta la están inventando.",
+    "La visión es más nítida: los hilos de luz nacen de una mano enguantada en "
+    "blanco. El Negro no ríe mientras baila: grita. Y nadie lo escucha.",
+    "Escuchas dos palabras en la visión: 'mi marioneta'. La voz no es del "
+    "Negro. Es cálida, luminosa... y te hiela la sangre.",
+    "La última visión: un trono radiante, una sonrisa serena, y siete hilos "
+    "colgando de una mano: seis de sombra y uno de luz. El verdadero "
+    "titiritero siempre estuvo bañado en luz.",
+]
 
 HOUSES = {}             # registro de interiores: key -> {return_to, return_pos, lore, elem}
 RT = {}                 # cache de runtime por clave de ubicación
@@ -929,10 +1270,38 @@ def _bake(key, name, theme, w, h, spawn, decor, talkers, enemies, exits, seed,
         g[y][x] = t
         protect.add((x, y))
     rng = random.Random(seed)
+    # BORDES IRREGULARES: la muralla exterior "muerde" hacia adentro en algunos
+    # puntos (1 casilla, a veces 2) para que el mapa no sea un rectángulo perfecto.
+    # Las zonas protegidas (cruz central, salidas y su 3x3) nunca se tocan.
+    if w >= 12 and h >= 9:
+        edges = ([(x, 1, 0, 1) for x in range(2, w - 2)] +
+                 [(x, h - 2, 0, -1) for x in range(2, w - 2)] +
+                 [(1, y, 1, 0) for y in range(2, h - 2)] +
+                 [(w - 2, y, -1, 0) for y in range(2, h - 2)])
+        for (bx, by, dx, dy) in edges:
+            if rng.random() < 0.16 and (bx, by) not in protect and g[by][bx] == 0:
+                g[by][bx] = 1
+                bx2, by2 = bx + dx, by + dy    # a veces la mordida es doble
+                if rng.random() < 0.3 and (bx2, by2) not in protect \
+                        and g[by2][bx2] == 0:
+                    g[by2][bx2] = 1
+    # DECORACIÓN EN GRUPOS ORGÁNICOS: en vez de dispersar uniformemente, se
+    # eligen FOCOS y cada uno agrupa varios elementos alrededor (bosquecillos,
+    # lagos, formaciones). La densidad total se mantiene similar a la anterior.
+    area = max(1, (w - 2) * (h - 2))
     for (tile, dens) in decor:
-        for y in range(1, h - 1):
-            for x in range(1, w - 1):
-                if (x, y) in protect or g[y][x] != 0 or rng.random() >= dens:
+        target = max(1, int(area * dens))
+        placed, guard = 0, 0
+        while placed < target and guard < target * 40:
+            fx = rng.randint(2, max(2, w - 3))     # foco del grupo
+            fy = rng.randint(2, max(2, h - 3))
+            for _ in range(rng.randint(2, 5)):     # elementos por grupo
+                guard += 1
+                x = fx + int(rng.gauss(0, 1.7))
+                y = fy + int(rng.gauss(0, 1.7))
+                if not (1 <= x < w - 1 and 1 <= y < h - 1):
+                    continue
+                if (x, y) in protect or g[y][x] != 0:
                     continue
                 if tile == 2:                  # ÁRBOL 1x2 (copa arriba + tronco abajo)
                     cells = [(x, y), (x, y + 1)]
@@ -940,6 +1309,9 @@ def _bake(key, name, theme, w, h, spawn, decor, talkers, enemies, exits, seed,
                     cells = [(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)]
                 else:                          # roca / poza pequeña: 1x1
                     g[y][x] = tile
+                    placed += 1
+                    if placed >= target:
+                        break
                     continue
                 if any(bx >= w - 1 or by >= h - 1 or (bx, by) in protect
                        or g[by][bx] != 0 for bx, by in cells):
@@ -947,6 +1319,9 @@ def _bake(key, name, theme, w, h, spawn, decor, talkers, enemies, exits, seed,
                 g[y][x] = tile
                 for bx, by in cells[1:]:
                     g[by][bx] = 9              # celda cubierta por el objeto (bloquea)
+                placed += 1
+                if placed >= target:
+                    break
     for ex in exits:
         x, y = ex["pos"]
         g[y][x] = 4
@@ -998,8 +1373,14 @@ def build_hub():
                {"x": cx + 7, "y": cy - 5, "elem": "luz", "name": "Niña",
                 "text": "El Mago Blanco te eligió a ti, el mago sin color. "
                         "¡Líbranos de la sombra del Mago Negro, señor gris!"}]
-    return _bake("hub", "Nexo del Gris", "hub", w, h, (cx, cy),
-                 [(1, 0.03)], talkers, [], exits, 7000)
+    st = _bake("hub", "Nexo del Gris", "hub", w, h, (cx, cy),
+               [], talkers, [], exits, 7000)
+    g = st["grid"]                              # HALL DESPEJADO: nada que bloquee
+    for _y in range(1, h - 1):                  # dentro solo hay suelo (0) y
+        for _x in range(1, w - 1):              # puertas (4); el borde queda de pared
+            if g[_y][_x] not in (0, 4):
+                g[_y][_x] = 0
+    return st
 
 
 def build_world(elem, s):
@@ -1084,6 +1465,25 @@ def build_world(elem, s):
         talkers.append({"x": p[0], "y": p[1], "elem": "luz", "name": nm,
                         "text": line, "welem": elem})
 
+    # NPC de MISIÓN secundaria: SOLO en la primera etapa del reino. Su estado
+    # vive en quest_st (partida), así que el mapa puede rehornearse sin perderlo.
+    if s == 0 and elem in SIDE_QUESTS:
+        qp = scatter(8, w - 8)
+        talkers.append({"x": qp[0], "y": qp[1], "elem": "luz",
+                        "name": SIDE_QUESTS[elem]["npc"], "quest": elem,
+                        "text": "", "welem": elem})
+
+    # MINI-JUEGO del mundo: un aldeano en la etapa FINAL (la de la maga poseída)
+    # te ofrece un juego y PAGA oro (pesca, forja, cosecha... ver minigames.py).
+    if s == 2:
+        mg_npc = {"fuego": "Forjador", "planta": "Recolectora",
+                  "agua": "Pescador Viejo", "tierra": "Buscavetas",
+                  "rayo": "Guardiana del Pararrayos",
+                  "hielo": "Escultor de Hielo"}.get(elem, "Aldeano")
+        talkers.append({"x": 13, "y": cy - 4, "elem": "agua",
+                        "name": mg_npc, "minigame": elem,
+                        "welem": elem, "text": ""})
+
     # vendedor errante: aparece en la etapa 2 O la 3 (al azar, fijo por mundo)
     merch_stage = random.Random(5000 + hash(elem) % 997).choice([1, 2])
     if s == merch_stage:
@@ -1128,6 +1528,16 @@ def build_world(elem, s):
     for _ in range(rng.randint(1, 2)):
         cp = scatter(8, w - 8)
         chests.append(_rand_chest(cp[0], cp[1], rng, ctier))
+
+    if s == 2 and elem == "agua":
+        # LAGUNA del mini-juego de pesca: 9x6 tiles de agua junto al Pescador
+        # Viejo (13, cy-4). Se limpian enemigos/cofres que cayeran dentro para
+        # que ningún acólito quede inalcanzable (bloquearía la puerta este).
+        lag = {(lx, ly) for lx in range(15, 24) for ly in range(cy - 8, cy - 2)}
+        enemies[:] = [e for e in enemies if (e["x"], e["y"]) not in lag]
+        chests[:] = [c for c in chests if (c["x"], c["y"]) not in lag]
+        for lx, ly in sorted(lag):
+            house_tiles.append((lx, ly, 3))
 
     return _bake(f"{elem}:{s}", name, theme, w, h, (1, cy),
                  WORLD_DECOR[elem], talkers, enemies, exits,
@@ -1243,61 +1653,69 @@ def build_f2():
     rng = random.Random(9002)
     chests = [_rand_chest(rng.randint(10, w - 10), rng.randint(4, h - 4), rng)
               for _ in range(2)]
-    exits.append({"pos": (w - 1, cy), "to": "f3", "spawn": (1, cy)})
-    return _bake("f2", "Refugio (2/6)", "cripta", w, h, (1, cy),
+    exits.append({"pos": (w - 1, cy), "to": "f3", "spawn": (1, 4)})   # f3 es pasillo (h=9)
+    return _bake("f2", "Refugio (2/7)", "cripta", w, h, (1, cy),
                  [(1, 0.03)], talkers, [], exits, 9010, tiles=tiles, chests=chests)
 
 
 def build_f3():
-    # 7-3: el Mago Negro. Al vencerlo: matarlo (absorbes poder) o perdonarlo (se une).
-    w, h = BIG
-    cx, cy = w // 2, h // 2
-    talkers = [{"x": 3, "y": cy, "elem": "neutro", "name": "Las 6 magas",
-                "text": "El Mago Negro está al frente. Recuerda: la verdad no "
-                        "siempre lleva túnica oscura."}]
-    enemies = [{"x": cx, "y": cy, "elem": "sombra", "boss": True, "subfinal": True,
+    # 7-3: el Mago Negro (PASILLO horizontal). Vencerlo = DESPOSEERLO.
+    w, h = 30, 9
+    cy = h // 2
+    talkers = [{"x": 2, "y": cy, "elem": "neutro", "name": "Las 6 magas",
+                "text": "El Mago Negro aguarda al fondo del pasillo. Rómpele el hechizo."}]
+    enemies = [{"x": w - 4, "y": cy, "elem": "sombra", "boss": True, "subfinal": True,
                 "throne": True, "kind": "boss", "name": "Mago Negro"}]
-    return _bake("f3", "Trono de los Dos Triángulos (3/6)", "cripta", w, h, (1, cy),
-                 [(1, 0.04)], talkers, enemies, [], 9020)
+    return _bake("f3", "Pasillo del Trono (3/7)", "cripta", w, h, (1, cy),
+                 [], talkers, enemies, [], 9020)
 
 
 def build_f4():
-    # 7-4: el DRAGÓN de Luz del Mago Blanco. Al vencerlo, el Blanco huye al santuario.
-    w, h = BIG
-    cx, cy = w // 2, h // 2
-    talkers = [{"x": 3, "y": cy, "elem": "luz", "name": "Mago Blanco",
-                "ai_persona": PERSONA_BLANCO,
-                "text": "Mi dragón te detendrá, Gris. No des un paso más."}]
-    enemies = [{"x": cx, "y": cy, "elem": "luz", "boss": True, "dragon": True,
-                "kind": "boss", "name": "Dragón de Luz"}]
-    return _bake("f4", "Foso del Dragón (4/6)", "cripta", w, h, (1, cy),
-                 [(1, 0.05)], talkers, enemies, [], 9030)
+    # 7-4: PRIMER enfrentamiento con el Mago Blanco (pasillo). HUYE antes de caer.
+    w, h = 30, 9
+    cy = h // 2
+    talkers = [{"x": 2, "y": cy, "elem": "luz", "name": "Ermitaño",
+                "text": "El Mago Blanco en persona bloquea el pasillo. No peleará limpio."}]
+    enemies = [{"x": w - 4, "y": cy, "elem": "luz", "boss": True, "blanco1": True,
+                "flees": True, "throne": True, "kind": "boss", "name": "Mago Blanco"}]
+    return _bake("f4", "Nave de la Luz (4/7)", "santuario", w, h, (1, cy),
+                 [], talkers, enemies, [], 9030)
 
 
 def build_f5():
-    # 7-5: último mercader antes del Mago Blanco.
-    w, h = BIG
-    cx, cy = w // 2, h // 2
-    talkers = [{"x": 6, "y": cy, "elem": "rayo", "name": "Mercader", "shop": True,
-                "text": "Última parada antes del verdadero amo. Que la luz no te engañe."}]
+    # 7-5: vendedor (pasillo). Puerta al este -> foso del dragón.
+    w, h = 26, 9
+    cy = h // 2
+    talkers = [{"x": w // 2, "y": cy, "elem": "rayo", "name": "Mercader", "shop": True,
+                "text": "Última parada antes del amo. Que la luz no te engañe, mago."}]
     rng = random.Random(9004)
-    chests = [_rand_chest(rng.randint(10, w - 10), rng.randint(4, h - 4), rng)]
+    chests = [_rand_chest(w // 2 + 4, cy, rng)]
     exits = [{"pos": (w - 1, cy), "to": "f6", "spawn": (1, cy)}]
-    return _bake("f5", "Umbral del Santuario (5/6)", "santuario", w, h, (1, cy),
-                 [(1, 0.03)], talkers, [], exits, 9040, chests=chests)
+    return _bake("f5", "Umbral (5/7)", "santuario", w, h, (1, cy),
+                 [], talkers, [], exits, 9040, chests=chests)
 
 
 def build_f6():
-    # 7-6: el Mago Blanco, verdadero villano final.
-    w, h = BIG
-    cx, cy = w // 2, h // 2
-    talkers = [{"x": 3, "y": cy, "elem": "luz", "name": "Mago Blanco",
+    # 7-6: el DRAGÓN de Luz (pasillo). Vencerlo -> pasillo final del Blanco.
+    w, h = 30, 9
+    cy = h // 2
+    talkers = [{"x": 2, "y": cy, "elem": "luz", "name": "Mago Blanco",
                 "ai_persona": PERSONA_BLANCO,
-                "text": "Llegaste hasta mi trono. Toda la luz era mía, Gris. Siempre."}]
-    enemies = [{"x": cx, "y": 8, "elem": "luz", "boss": True, "final": True,
+                "text": "Mi dragón te detendrá, Gris. No llegarás a mi trono."}]
+    enemies = [{"x": w - 5, "y": cy, "elem": "luz", "boss": True, "dragon": True,
+                "kind": "boss", "name": "Dragón de Luz"}]
+    return _bake("f6", "Foso del Dragón (6/7)", "cripta", w, h, (1, cy),
+                 [], talkers, enemies, [], 9035)
+
+
+def build_f7():
+    # 7-7: el Mago Blanco FINAL (PASILLO VERTICAL). Sube hasta su trono al fondo.
+    w, h = 9, 26
+    cx = w // 2
+    enemies = [{"x": cx, "y": 3, "elem": "luz", "boss": True, "final": True,
                 "throne": True, "kind": "boss", "name": "Mago Blanco"}]
-    return _bake("f6", "Santuario de la Luz (6/6)", "santuario", w, h, (cx, h - 3),
-                 [(1, 0.04)], talkers, enemies, [], 9050)
+    return _bake("f7", "Santuario de la Luz (7/7)", "santuario", w, h, (cx, h - 3),
+                 [], [], enemies, [], 9050)
 
 
 def build_endscene(ekey):
@@ -1320,7 +1738,7 @@ def build_endscene(ekey):
 
 
 _FIN_BUILDERS = {"f1": build_f1, "f2": build_f2, "f3": build_f3,
-                 "f4": build_f4, "f5": build_f5, "f6": build_f6}
+                 "f4": build_f4, "f5": build_f5, "f6": build_f6, "f7": build_f7}
 
 
 def get_stage(key):
@@ -1348,11 +1766,25 @@ def blocked(grid, tx, ty):
 
 def calc_cam(px, py, w, h):
     """Cámara centrada en el jugador, recortada al mapa. El área de juego va
-    bajo el HUD (alto visible = H - HUD_H), por eso usa esa altura vertical."""
+    bajo el HUD (alto visible = H - HUD_H). Los mapas MÁS CHICOS que la pantalla
+    (pasillos) se CENTRAN, para que no queden pegados a una esquina."""
     vh = H - HUD_H
-    cx = max(0, min(px * TILE + TILE // 2 - W // 2, w * TILE - W))
-    cy = max(0, min(py * TILE + TILE // 2 - vh // 2, max(0, h * TILE - vh)))
+    mw, mh = w * TILE, h * TILE
+    if mw <= W:
+        cx = (mw - W) // 2                     # pasillo angosto -> centrado horizontal
+    else:
+        cx = max(0, min(px * TILE + TILE // 2 - W // 2, mw - W))
+    if mh <= vh:
+        cy = (mh - vh) // 2                     # pasillo bajo -> centrado vertical
+    else:
+        cy = max(0, min(py * TILE + TILE // 2 - vh // 2, mh - vh))
     return int(cx), int(cy)
+
+
+def _thash(x, y):
+    """Hash determinista por casilla: da variedad SIN parpadeo entre frames."""
+    h = (x * 92837111) ^ (y * 689287499)
+    return (h ^ (h >> 13)) & 0x7FFFFFFF
 
 
 def draw_tile(theme, x, y, kind, camx, camy):
@@ -1362,8 +1794,40 @@ def draw_tile(theme, x, y, kind, camx, camy):
         pygame.draw.rect(screen, th["wall"], r)
         pygame.draw.rect(screen, th["wall2"], r, 2)
         return
-    pygame.draw.rect(screen, th["floor"], r)
+    hsh = _thash(x, y)
+    t = pygame.time.get_ticks()
+    ph = (hsh % 628) / 100.0                   # fase propia (anima desfasado)
+    # SUELO con parches de tono (variedad visual, determinista)
+    if hsh % 5 == 0:
+        pygame.draw.rect(screen, _shade(th["floor"], 1.10 if hsh % 2 else 0.90), r)
+    else:
+        pygame.draw.rect(screen, th["floor"], r)
     pygame.draw.rect(screen, th["grid"], r, 1)
+    # DETALLES de suelo por mundo (solo en casillas vacías; no bloquean)
+    if kind == 0 and hsh % 9 == 0:
+        dx = r.x + 6 + (hsh >> 4) % (TILE - 12)
+        dy = r.y + 6 + (hsh >> 9) % (TILE - 12)
+        if theme.startswith("volcan"):         # grieta encendida
+            pygame.draw.line(screen, (205, 95, 40), (dx - 4, dy), (dx + 4, dy + 2), 2)
+        elif theme.startswith("bosque"):       # flor o mata de pasto
+            if hsh % 2:
+                pygame.draw.circle(screen, (235, 225, 130), (dx, dy), 2)
+                pygame.draw.circle(screen, (255, 255, 255), (dx, dy), 1)
+            else:
+                pygame.draw.line(screen, (58, 112, 62), (dx, dy + 3), (dx - 3, dy - 3), 1)
+                pygame.draw.line(screen, (58, 112, 62), (dx, dy + 3), (dx + 3, dy - 3), 1)
+        elif theme.startswith("mar"):          # burbuja / destello
+            pygame.draw.circle(screen, (125, 185, 225), (dx, dy), 2, 1)
+        elif theme.startswith("canon"):        # piedritas
+            pygame.draw.circle(screen, (152, 124, 84), (dx, dy), 2)
+            pygame.draw.circle(screen, (138, 112, 76), (dx + 4, dy + 2), 1)
+        elif theme.startswith("tormenta"):     # esquirla de cristal
+            pygame.draw.line(screen, (155, 145, 215), (dx, dy - 3), (dx, dy + 3), 1)
+            pygame.draw.line(screen, (155, 145, 215), (dx - 2, dy), (dx + 2, dy), 1)
+        elif theme.startswith("pico"):         # mancha de nieve
+            pygame.draw.ellipse(screen, (236, 243, 250), (dx - 3, dy - 2, 8, 5))
+        else:                                  # motita genérica (hub, aldea...)
+            pygame.draw.circle(screen, _shade(th["grid"], 1.25), (dx, dy), 1)
     # kinds 2 (árbol) y 5 (poza grande) ocupan 2x2: aquí solo va el suelo; el
     # objeto se dibuja en una 2ª pasada (draw_big_decor). 9 = celda cubierta.
     if kind == 3:                              # poza pequeña (1x1) — color según mundo
@@ -1375,24 +1839,38 @@ def draw_tile(theme, x, y, kind, camx, camy):
             wc, wc2 = (40, 90, 160), (70, 130, 210)      # agua
         pygame.draw.ellipse(screen, wc, r.inflate(-4, -4))
         pygame.draw.ellipse(screen, wc2, r.inflate(-4, -4), 2)
+        # BRILLO que se desplaza sobre el agua (animado)
+        gx = r.centerx + int(math.cos(t / 520.0 + ph) * 5)
+        gy = r.centery - 2 + int(math.sin(t / 730.0 + ph) * 3)
+        pygame.draw.circle(screen, _shade(wc2, 1.35), (gx, gy), 2)
     elif kind == 6:                            # obstáculo del entorno (según el mundo)
         cxp, cyp = r.center
         rad = TILE // 2 - 2
-        if theme.startswith("volcan"):         # MAGMA incandescente
+        if theme.startswith("volcan"):         # MAGMA incandescente (PULSA)
+            pul = int(2.5 * math.sin(t / 260.0 + ph))
             pygame.draw.circle(screen, (60, 24, 18), (cxp, cyp), rad)
             pygame.draw.circle(screen, (210, 90, 30), (cxp, cyp), rad - 4)
-            pygame.draw.circle(screen, (255, 185, 70), (cxp, cyp), rad - 9)
+            pygame.draw.circle(screen, (255, 185, 70), (cxp, cyp),
+                               max(3, rad - 9 + pul))
+            if pul > 1:                        # burbuja brillante en el pico del pulso
+                pygame.draw.circle(screen, (255, 240, 160), (cxp - 3, cyp - 3), 2)
         elif theme.startswith("canon"):        # peñasco de arenisca
             pygame.draw.circle(screen, (110, 86, 52), (cxp, cyp), rad)
             pygame.draw.circle(screen, (150, 122, 80), (cxp, cyp), rad - 5)
-        elif theme.startswith("tormenta"):     # cristal de tormenta
+        elif theme.startswith("tormenta"):     # cristal de tormenta (TITILA)
             pts = [(cxp, cyp - rad), (cxp + rad - 2, cyp),
                    (cxp, cyp + rad), (cxp - rad + 2, cyp)]
+            glow = 0.5 + 0.5 * math.sin(t / 210.0 + ph)
             pygame.draw.polygon(screen, (92, 82, 150), pts)
-            pygame.draw.polygon(screen, (185, 175, 245), pts, 2)
-        elif theme.startswith("pico"):         # roca de HIELO
+            pygame.draw.polygon(screen, _shade((185, 175, 245), 0.8 + 0.45 * glow),
+                                pts, 2)
+            if glow > 0.82:                    # chispazo en el vértice
+                pygame.draw.circle(screen, (255, 255, 255), (cxp, cyp - rad + 2), 2)
+        elif theme.startswith("pico"):         # roca de HIELO (destella)
             pygame.draw.circle(screen, (140, 175, 200), (cxp, cyp), rad)
             pygame.draw.circle(screen, (210, 235, 250), (cxp, cyp), rad - 6)
+            if int(t / 380.0 + ph) % 5 == 0:
+                pygame.draw.circle(screen, (255, 255, 255), (cxp + 4, cyp - 4), 2)
         else:                                  # roca genérica
             pygame.draw.circle(screen, th["wall"], (cxp, cyp), rad)
             pygame.draw.circle(screen, th["wall2"], (cxp, cyp), rad, 2)
@@ -1414,8 +1892,11 @@ def draw_big_decor(theme, x, y, kind, camx, camy):
     abajo); poza grande = 2x2. Se dibuja en una 2ª pasada para no cortarse."""
     bx = x * TILE - camx
     by = y * TILE - camy
+    t = pygame.time.get_ticks()
+    ph = (_thash(x, y) % 628) / 100.0
     if kind == 2:                              # ÁRBOL 1x2: copa (arriba) + tronco (abajo)
         dry = theme.endswith("_dark")          # mundo poseído -> árbol SECO
+        sway = 0 if dry else int(1.5 * math.sin(t / 900.0 + ph))   # se MECE
         cxt = bx + TILE // 2                    # 1 casilla de ancho
         ccy = by + TILE // 2                    # centro de la copa (casilla de arriba)
         # tronco en la casilla de ABAJO
@@ -1426,17 +1907,29 @@ def draw_big_decor(theme, x, y, kind, camx, camy):
             pygame.draw.line(screen, (95, 70, 35), (cxt, ccy), (cxt - 10, ccy - 10), 3)
             pygame.draw.line(screen, (95, 70, 35), (cxt, ccy), (cxt + 10, ccy - 11), 3)
         else:                                  # frondoso y verde (maga liberada)
-            pygame.draw.circle(screen, (24, 95, 50), (cxt, ccy), TILE // 2 + 2)
-            pygame.draw.circle(screen, (40, 130, 70), (cxt, ccy), TILE // 2 - 3)
+            pygame.draw.circle(screen, (24, 95, 50), (cxt + sway, ccy), TILE // 2 + 2)
+            pygame.draw.circle(screen, (40, 130, 70), (cxt + sway, ccy), TILE // 2 - 3)
     elif kind == 5:                            # POZA de agua grande (2x2)
         rr = pygame.Rect(bx + 3, by + 3, TILE * 2 - 6, TILE * 2 - 6)
         pygame.draw.ellipse(screen, (40, 90, 160), rr)
         pygame.draw.ellipse(screen, (70, 130, 210), rr, 3)
         pygame.draw.ellipse(screen, (120, 180, 240), rr.inflate(-16, -16), 2)
+        # OLEAJE: dos brillos que orbitan lentamente sobre el agua
+        for k, spd in ((0, 640.0), (2.4, 870.0)):
+            gx = rr.centerx + int(math.cos(t / spd + ph + k) * (rr.w // 4))
+            gy = rr.centery + int(math.sin(t / (spd * 1.3) + ph + k) * (rr.h // 5))
+            pygame.draw.circle(screen, (170, 215, 250), (gx, gy), 2)
+
+
+def _shade(col, f):
+    """Oscurece (f<1) o aclara (f>1) un color, con tope en 255."""
+    return tuple(min(255, max(0, int(c * f))) for c in col[:3])
 
 
 def draw_actor(color, px, py, bob=0, camx=0, camy=0, face=None, scale=1.0,
-               wings=False):
+               wings=False, kind=None):
+    """Dibuja un personaje. kind: 'mago' (sombrero puntiagudo, barba y bastón),
+    'maga' (sombrero de bruja, melena, vestido y varita) o None (aldeano)."""
     # El personaje OCUPA ~2 casillas de alto: pies anclados en la base de su
     # casilla y el cuerpo+cabeza subiendo una casilla más (estilo RPG).
     cx = int(px * TILE + TILE // 2 - camx)
@@ -1446,6 +1939,9 @@ def draw_actor(color, px, py, bob=0, camx=0, camy=0, face=None, scale=1.0,
     head_r = max(4, int((TILE // 2 - 5) * scale))
     head_cy = feet - bh + head_r
     body_top = head_cy + head_r - 3
+    dark = _shade(color, 0.55)
+    lite = _shade(color, 1.45)
+    skin = (235, 205, 170)
     # sombra en el suelo
     pygame.draw.ellipse(screen, (20, 20, 24), (cx - bw // 2, feet - 3, bw, 7))
     if wings:                                       # alas (ángel / dragón)
@@ -1457,13 +1953,78 @@ def draw_actor(color, px, py, bob=0, camx=0, camy=0, face=None, scale=1.0,
         pygame.draw.polygon(screen, wc, [(cx + bw // 2, wy),
                                          (cx + bw // 2 + 12, wy - 10),
                                          (cx + bw // 2 + 8, wy + 10)])
-    # cuerpo (túnica)
-    body = pygame.Rect(cx - bw // 2, body_top, bw, max(4, feet - body_top))
-    pygame.draw.rect(screen, color, body, border_radius=6)
-    pygame.draw.rect(screen, WHITE, body, 2, border_radius=6)
-    # cabeza
-    pygame.draw.circle(screen, color, (cx, head_cy), head_r)
-    pygame.draw.circle(screen, WHITE, (cx, head_cy), head_r, 2)
+
+    if kind == "maga":
+        # BASTÓN corto (varita) al costado, con estrella brillante
+        wx = cx + bw // 2 + 3
+        pygame.draw.line(screen, (150, 110, 60), (wx, feet - 4),
+                         (wx + 3, body_top + 2), 2)
+        pygame.draw.circle(screen, lite, (wx + 3, body_top + 1), 3)
+        pygame.draw.circle(screen, WHITE, (wx + 3, body_top + 1), 1)
+        # VESTIDO acampanado (trapecio): hombros angostos, base ancha
+        pygame.draw.polygon(screen, color, [
+            (cx - bw // 3, body_top), (cx + bw // 3, body_top),
+            (cx + bw // 2 + 2, feet), (cx - bw // 2 - 2, feet)])
+        pygame.draw.polygon(screen, WHITE, [
+            (cx - bw // 3, body_top), (cx + bw // 3, body_top),
+            (cx + bw // 2 + 2, feet), (cx - bw // 2 - 2, feet)], 2)
+        pygame.draw.line(screen, lite, (cx - bw // 4, body_top + 6),
+                         (cx + bw // 4, body_top + 6), 2)   # cinturón claro
+        # MELENA: cae a ambos lados de la cara hasta los hombros
+        hr = head_r
+        pygame.draw.circle(screen, dark, (cx, head_cy), hr + 2)
+        pygame.draw.rect(screen, dark, (cx - hr - 2, head_cy, 5, hr + 8),
+                         border_radius=2)
+        pygame.draw.rect(screen, dark, (cx + hr - 3, head_cy, 5, hr + 8),
+                         border_radius=2)
+        # CARA
+        pygame.draw.circle(screen, skin, (cx, head_cy), hr - 1)
+        # SOMBRERO de bruja: ala ancha + cono alto ligeramente inclinado
+        brim_y = head_cy - hr + 3
+        pygame.draw.ellipse(screen, dark, (cx - hr - 6, brim_y - 3,
+                                           2 * hr + 12, 7))
+        pygame.draw.polygon(screen, color, [
+            (cx - hr + 1, brim_y), (cx + hr - 1, brim_y),
+            (cx + 4, brim_y - hr - 9)])
+        pygame.draw.line(screen, GOLD, (cx - hr + 2, brim_y - 1),
+                         (cx + hr - 2, brim_y - 1), 2)      # banda dorada
+    elif kind == "mago":
+        # BASTÓN alto con ORBE del color del mago (brilla)
+        sx_ = cx - bw // 2 - 4
+        pygame.draw.line(screen, (150, 110, 60), (sx_, feet - 2),
+                         (sx_, head_cy - 2), 3)
+        pygame.draw.circle(screen, lite, (sx_, head_cy - 5), 5)
+        pygame.draw.circle(screen, WHITE, (sx_, head_cy - 5), 5, 1)
+        pygame.draw.circle(screen, WHITE, (sx_ - 1, head_cy - 6), 1)
+        # TÚNICA (recta, con cinturón y estrella)
+        body = pygame.Rect(cx - bw // 2, body_top, bw, max(4, feet - body_top))
+        pygame.draw.rect(screen, color, body, border_radius=6)
+        pygame.draw.rect(screen, WHITE, body, 2, border_radius=6)
+        pygame.draw.line(screen, GOLD, (cx - bw // 2 + 3, body_top + 8),
+                         (cx + bw // 2 - 3, body_top + 8), 2)
+        pygame.draw.circle(screen, GOLD, (cx, body_top + 16), 2)
+        # CARA + BARBA gris cayendo del mentón
+        pygame.draw.circle(screen, skin, (cx, head_cy), head_r - 1)
+        pygame.draw.polygon(screen, (200, 200, 205), [
+            (cx - head_r + 3, head_cy + 2), (cx + head_r - 3, head_cy + 2),
+            (cx, head_cy + head_r + 7)])
+        # SOMBRERO puntiagudo con ala corta y punta doblada
+        brim_y = head_cy - head_r + 4
+        pygame.draw.ellipse(screen, dark, (cx - head_r - 4, brim_y - 3,
+                                           2 * head_r + 8, 7))
+        pygame.draw.polygon(screen, color, [
+            (cx - head_r + 1, brim_y), (cx + head_r - 1, brim_y),
+            (cx - 3, brim_y - head_r - 11)])
+        pygame.draw.circle(screen, color, (cx - 5, brim_y - head_r - 11), 3)
+        pygame.draw.line(screen, GOLD, (cx - head_r + 2, brim_y - 1),
+                         (cx + head_r - 2, brim_y - 1), 2)  # banda dorada
+    else:
+        # ALDEANO / criatura: el diseño simple de siempre
+        body = pygame.Rect(cx - bw // 2, body_top, bw, max(4, feet - body_top))
+        pygame.draw.rect(screen, color, body, border_radius=6)
+        pygame.draw.rect(screen, WHITE, body, 2, border_radius=6)
+        pygame.draw.circle(screen, color, (cx, head_cy), head_r)
+        pygame.draw.circle(screen, WHITE, (cx, head_cy), head_r, 2)
     # ojos/marcador en la dirección que mira
     fx, fy = face if face else (0, 1)
     ex, ey = cx + fx * 4, head_cy + fy * 3 - 1
@@ -1472,6 +2033,69 @@ def draw_actor(color, px, py, bob=0, camx=0, camy=0, face=None, scale=1.0,
     if face:
         pygame.draw.circle(screen, (250, 240, 180),
                            (cx + fx * head_r, head_cy + fy * head_r), 3)
+
+
+def draw_dragon3(color, cx, cy, s, flash=False):
+    """DRAGÓN DE TRES CABEZAS. (cx, cy) = centro del cuerpo; s = radio base.
+    Sirve para el overworld y para la pantalla de batalla."""
+    col = (255, 255, 255) if flash else color
+    dark = _shade(color, 0.5)
+    belly = _shade(color, 1.5)
+    wing = (255, 250, 210)
+    # ALAS membranosas grandes (detrás del cuerpo)
+    pygame.draw.polygon(screen, wing, [
+        (cx - s + 8, cy - 4), (cx - s - int(s * 1.0), cy - int(s * 0.9)),
+        (cx - s - int(s * 0.55), cy + int(s * 0.35))])
+    pygame.draw.polygon(screen, wing, [
+        (cx + s - 8, cy - 4), (cx + s + int(s * 1.0), cy - int(s * 0.9)),
+        (cx + s + int(s * 0.55), cy + int(s * 0.35))])
+    pygame.draw.polygon(screen, dark, [
+        (cx - s + 8, cy - 4), (cx - s - int(s * 1.0), cy - int(s * 0.9)),
+        (cx - s - int(s * 0.55), cy + int(s * 0.35))], 2)
+    pygame.draw.polygon(screen, dark, [
+        (cx + s - 8, cy - 4), (cx + s + int(s * 1.0), cy - int(s * 0.9)),
+        (cx + s + int(s * 0.55), cy + int(s * 0.35))], 2)
+    # COLA con punta de flecha
+    pygame.draw.polygon(screen, col, [
+        (cx + s - 10, cy + int(s * 0.35)),
+        (cx + s + int(s * 0.8), cy + int(s * 0.75)),
+        (cx + s + int(s * 0.35), cy + int(s * 0.9))])
+    pygame.draw.polygon(screen, dark, [
+        (cx + s + int(s * 0.8), cy + int(s * 0.75)),
+        (cx + s + int(s * 1.1), cy + int(s * 0.6)),
+        (cx + s + int(s * 1.05), cy + int(s * 1.0))])
+    # PATAS
+    lw, lh = max(6, s // 4), max(8, s // 3)
+    pygame.draw.rect(screen, dark, (cx - s // 2 - lw // 2, cy + s - lh + 4, lw, lh),
+                     border_radius=3)
+    pygame.draw.rect(screen, dark, (cx + s // 2 - lw // 2, cy + s - lh + 4, lw, lh),
+                     border_radius=3)
+    # TRES CUELLOS que salen del lomo
+    hr = max(6, s // 3)                      # radio de cada cabeza
+    heads = [(cx - int(s * 0.85), cy - s - int(s * 0.30)),
+             (cx,                 cy - s - int(s * 0.55)),
+             (cx + int(s * 0.85), cy - s - int(s * 0.30))]
+    nk = max(4, s // 5)
+    for hx, hy in heads:
+        pygame.draw.line(screen, col, (cx, cy - s // 2), (hx, hy + hr - 2), nk)
+    # CUERPO + PANZA
+    pygame.draw.ellipse(screen, col, (cx - s, cy - s + 6, 2 * s, 2 * s - 8))
+    pygame.draw.ellipse(screen, dark, (cx - s, cy - s + 6, 2 * s, 2 * s - 8), 3)
+    pygame.draw.ellipse(screen, belly, (cx - int(s * 0.55), cy - 2,
+                                        int(s * 1.1), s - 2))
+    # TRES CABEZAS: cuernos, ojos rojos y hocico
+    for hx, hy in heads:
+        pygame.draw.polygon(screen, dark, [(hx - hr + 2, hy - hr + 3),
+                                           (hx - hr - 4, hy - hr - 6),
+                                           (hx - hr + 6, hy - hr + 1)])
+        pygame.draw.polygon(screen, dark, [(hx + hr - 2, hy - hr + 3),
+                                           (hx + hr + 4, hy - hr - 6),
+                                           (hx + hr - 6, hy - hr + 1)])
+        pygame.draw.circle(screen, col, (hx, hy), hr)
+        pygame.draw.circle(screen, dark, (hx, hy), hr, 2)
+        pygame.draw.circle(screen, belly, (hx, hy + hr // 2), max(3, hr // 2))
+        pygame.draw.circle(screen, (230, 40, 40), (hx - hr // 3, hy - 2), 2)
+        pygame.draw.circle(screen, (230, 40, 40), (hx + hr // 3, hy - 2), 2)
 
 
 def draw_chest(cx_t, cy_t, camx, camy):
@@ -1493,16 +2117,27 @@ def draw_throne(cx_t, cy_t, camx, camy):
 
 
 def draw_throne_big(cx_t, cy_t, camx, camy):
-    """Trono COLOSAL del Mago Blanco (mayor que el de las magas), con halo de luz."""
+    """Trono COLOSAL del Mago Blanco: ~3 casillas de ancho x 5 de alto."""
     x = cx_t * TILE + TILE // 2 - camx
-    y = cy_t * TILE + TILE // 2 - camy
-    pygame.draw.circle(screen, (255, 250, 215), (x, y - 12), 34, 3)   # halo de luz
-    pygame.draw.rect(screen, (120, 95, 30), (x - 30, y - 50, 8, 64))  # columnas
-    pygame.draw.rect(screen, (120, 95, 30), (x + 22, y - 50, 8, 64))
-    pygame.draw.rect(screen, (150, 120, 40), (x - 24, y - 42, 48, 58), border_radius=6)
-    pygame.draw.rect(screen, (235, 205, 90), (x - 24, y - 42, 48, 58), 3, border_radius=6)
-    pygame.draw.circle(screen, (255, 240, 160), (x - 26, y - 52), 5)  # remates dorados
-    pygame.draw.circle(screen, (255, 240, 160), (x + 26, y - 52), 5)
+    base = cy_t * TILE + TILE - 2 - camy        # línea de suelo (pies del mago)
+    HW = TILE * 3 // 2                            # media anchura -> 3 casillas
+    TH = TILE * 5                                 # alto total -> 5 casillas
+    top = base - TH
+    pygame.draw.circle(screen, (255, 250, 215), (x, top + 28), 42, 3)         # halo
+    # respaldo alto (deja hueco lateral para las columnas)
+    pygame.draw.rect(screen, (150, 120, 40), (x - HW + 10, top, (HW - 10) * 2, TH),
+                     border_radius=12)
+    pygame.draw.rect(screen, (235, 205, 90), (x - HW + 10, top, (HW - 10) * 2, TH), 3,
+                     border_radius=12)
+    # columnas laterales
+    pygame.draw.rect(screen, (120, 95, 30), (x - HW, top + 8, 12, TH - 8))
+    pygame.draw.rect(screen, (120, 95, 30), (x + HW - 12, top + 8, 12, TH - 8))
+    # reposabrazos a la altura del asiento
+    pygame.draw.rect(screen, (120, 95, 30), (x - HW, base - TILE, HW * 2, 12),
+                     border_radius=4)
+    # remates dorados en lo alto
+    pygame.draw.circle(screen, (255, 240, 160), (x - HW + 6, top + 4), 8)
+    pygame.draw.circle(screen, (255, 240, 160), (x + HW - 6, top + 4), 8)
 
 
 # ============================================================
@@ -1515,6 +2150,7 @@ class DialogBox:
         self.shown = 0
         self.active = False
         self.speaker = ""
+        self.anim = 0                # frames de la animación de ENTRADA (desliza)
 
     def open(self, speaker, text):
         self.speaker = speaker
@@ -1522,6 +2158,7 @@ class DialogBox:
         self.page = 0
         self.shown = 0
         self.active = True
+        self.anim = 10               # la caja SUBE deslizándose al abrirse
 
     def advance(self):
         full = "".join(self._page_text())
@@ -1538,13 +2175,16 @@ class DialogBox:
         return self.lines[self.page:self.page + 3]
 
     def update(self):
+        if self.anim > 0:
+            self.anim -= 1
         full = sum(len(l) for l in self._page_text())
         if self.shown < full:
             self.shown += OPTS.get("text_speed", 2)
 
     def draw(self):
         bh = 110
-        box = pygame.Rect(20, H - bh - 16, W - 40, bh)
+        oy = int((self.anim / 10) ** 2 * 80)     # desliza desde abajo (con easing)
+        box = pygame.Rect(20, H - bh - 16 + oy, W - 40, bh)
         pygame.draw.rect(screen, BOX_BG, box, border_radius=8)
         pygame.draw.rect(screen, BOX_BORDER, box, 3, border_radius=8)
         if self.speaker:
@@ -1600,6 +2240,15 @@ class Battle:
         self.fled = False
         self._awarded = False
         self.shake_t = 0             # sacudida de pantalla al recibir un golpe
+        self.particles = []          # chispas elementales (golpes, curas)
+        self.floaters = []           # números flotantes (-daño / +cura / estados)
+        self.last_status = None      # estado alterado aplicado por el último golpe
+        self._end_sfx = False        # jingle de victoria/derrota (una sola vez)
+        self._hit_sfx_t = 0          # anti-saturación de sonido en golpes de área
+        self._menu_anim = 0          # animación de ENTRADA de menús/paneles
+        self._last_phase = ""        # para detectar el cambio de fase
+        for a in self.actors:        # el combate empieza SIN estados alterados
+            a["status"] = {}
         self.menu = ["Atacar", "Poderes", "Combos", "Bolsa", "Cubrirse", "Huir"]
         self._next_actor()
         self.push_comment("start")
@@ -1608,9 +2257,12 @@ class Battle:
         return [a for a in self.actors if a["alive"] and a["side"] == side]
 
     def _item_targets(self, item):
-        """Aliados válidos para un objeto: caídos si es revivir, vivos si no."""
+        """Aliados válidos para un objeto: caídos si es revivir, vivos si no.
+        El Remedio (cure) solo apunta a aliados CON estados alterados."""
         if item and item.get("kind") == "revive":
             return [a for a in self.party if not a["alive"]]
+        if item and item.get("kind") == "cure":
+            return [a for a in self.party if a["alive"] and a.get("status")]
         return [a for a in self.party if a["alive"]]
 
     def _next_actor(self):
@@ -1630,6 +2282,16 @@ class Battle:
         self.cur = max(pending, key=lambda a: a["spd"])
         self.acted.add(id(self.cur))
         self.cur["guard"] = False
+        # ESTADOS ALTERADOS: quemadura (daño), congelado/paralizado (pierde turno)
+        skip, txt = self._status_tick(self.cur)
+        if txt:
+            then = "next" if (skip or not self.cur["alive"]) else "turn"
+            self._say(txt, then=then)
+            return
+        self._begin_turn()
+
+    def _begin_turn(self):
+        """Comienza el turno del actor actual (tras resolver sus estados)."""
         if self.cur["side"] == "enemy":
             self._enemy_turn()
         else:
@@ -1637,6 +2299,68 @@ class Battle:
             self.phase = "menu"
             self.menu_i = 0
             self.suggestion = self._ai_suggest(self.cur) if self.cur.get("ai") else ""
+
+    def _status_tick(self, c):
+        """Resuelve los estados del actor al INICIO de su turno.
+        Devuelve (pierde_turno, texto). Decrementa la duración de cada estado."""
+        st = c.get("status") or {}
+        if not st:
+            return False, ""
+        msgs, skip = [], False
+        if "quemado" in st:
+            d = max(1, c["maxhp"] * 6 // 100)
+            c["hp"] = max(1 if c.get("flees") else 0, c["hp"] - d)
+            self.fx_burst(c, STATUS_INFO["quemado"]["col"], n=10)
+            self.fx_float(c, f"-{d}", STATUS_INFO["quemado"]["col"])
+            sfx("quemado")
+            msgs.append(f"{c['name']} sufre quemaduras (-{d})")
+            if c["hp"] == 0:
+                c["alive"] = False
+                msgs.append(f"¡{c['name']} cae!")
+        if "envenenado" in st and c["alive"]:
+            d = max(1, c["maxhp"] * 5 // 100)
+            c["hp"] = max(1 if c.get("flees") else 0, c["hp"] - d)
+            self.fx_burst(c, STATUS_INFO["envenenado"]["col"], n=8)
+            self.fx_float(c, f"-{d}", STATUS_INFO["envenenado"]["col"])
+            sfx("envenenado")
+            msgs.append(f"{c['name']} sufre por el veneno (-{d})")
+            if c["hp"] == 0:
+                c["alive"] = False
+                msgs.append(f"¡{c['name']} cae!")
+        if c["alive"]:
+            if "congelado" in st and random.random() < 0.5:
+                skip = True
+                sfx("congelado")
+                msgs.append(f"{c['name']} está congelado y pierde el turno")
+            elif "paralizado" in st and random.random() < 0.35:
+                skip = True
+                sfx("paralizado")
+                msgs.append(f"{c['name']} está paralizado y no reacciona")
+        for k in list(st):                     # la duración baja en el turno propio
+            st[k] -= 1
+            if st[k] <= 0:
+                del st[k]
+                msgs.append(f"{c['name']} ya no está {k}")
+        return skip, ".  ".join(msgs)
+
+    def _try_status(self, elem, dst, mult):
+        """Intenta aplicar el estado del elemento atacante al objetivo."""
+        name = STATUS_OF_ELEM.get(elem)
+        if not name or not dst["alive"] or name in dst.setdefault("status", {}):
+            return None
+        chance = STATUS_CHANCE_SUPER if mult >= SUPER else STATUS_CHANCE
+        boss = any(dst.get(k) for k in ("boss", "maga", "subfinal", "final",
+                                        "dragon", "prologue"))
+        turns = STATUS_INFO[name]["turns"]
+        if boss:
+            chance *= 0.5                      # los jefes RESISTEN los estados
+            turns = max(1, turns - 1)
+        if random.random() >= chance:
+            return None
+        dst["status"][name] = turns
+        self.fx_float(dst, f"¡{name.capitalize()}!", STATUS_INFO[name]["col"])
+        sfx(name)
+        return name
 
     def _say(self, text, then="next"):
         self.msg = text
@@ -1654,6 +2378,9 @@ class Battle:
             self.phase = "lose"; return
         if self._alive("enemy") == []:
             self.phase = "win"; self.push_comment("win"); return
+        if self._after_msg == "turn":          # estados resueltos -> empieza su turno
+            self._after_msg = "next"
+            self._begin_turn(); return
         if self._after_msg == "step":          # al enemigo le quedan acciones
             self._after_msg = "next"
             self._enemy_step(); return
@@ -1664,6 +2391,8 @@ class Battle:
         """Acierto/crítico según PRECISIÓN del atacante y VELOCIDAD (evasión) del rival."""
         eva = dst.get("spd", 0) // 3 + wear_bonus(dst, "eva") + (15 if dst.get("guard") else 0)
         pre = src.get("pre", 90)
+        if "cegado" in (src.get("status") or {}):     # arena: cegado -> falla más
+            pre -= 35
         if random.randint(1, 100) > pre - eva:        # más velocidad rival -> más fallos
             return "miss"
         # crítico: sube con la PRECISIÓN (máx 75%) y se le RESTA la evasión del rival
@@ -1672,7 +2401,7 @@ class Battle:
             return "crit"
         return "hit"
 
-    def _damage(self, src, dst, power, elem=None, crit=False):
+    def _damage(self, src, dst, power, elem=None, crit=False, split=1):
         elem = elem or src.get("elem")
         mult = effectiveness(elem, dst.get("elem")) if elem and dst.get("elem") else 1.0
         defv = dst["df"] + (self.armor_def if dst.get("side") == "hero" else 0) \
@@ -1690,33 +2419,48 @@ class Battle:
         agu = dst.get("agu", 0)              # AGUANTE: mitiga daño (máx 60%)
         if agu:
             dmg = max(1, int(dmg * (1 - min(agu, 60) / 100)))
-        dst["hp"] = max(0, dst["hp"] - dmg)
+        if split > 1:                        # ÁREA: el golpe se REPARTE
+            dmg = max(1, dmg // split)       # (100 a 5 -> 20 a cada uno)
+        # los jefes que HUYEN no pueden morir: quedan en 1 y se retiran en su turno
+        dst["hp"] = max(1 if dst.get("flees") else 0, dst["hp"] - dmg)
         dst["hit_t"] = pygame.time.get_ticks()    # marca para el flinch del sprite
+        # FX: chispas del color del elemento + número de daño + sonido del golpe
+        self.fx_burst(dst, ELEM_COLOR.get(elem, WHITE), n=18 if crit else 12)
+        self.fx_float(dst, f"-{dmg}", GOLD if crit else
+                      ((255, 120, 120) if dst.get("side") == "hero" else WHITE),
+                      big=crit)
+        self._play_hit(crit)
         if dst.get("side") == "hero":             # TÚ recibes -> sacude la pantalla
             self.shake_t = max(self.shake_t, 14 if not crit else 20)
         if dst["hp"] == 0:
             dst["alive"] = False
             if dst.get("side") == "enemy":
                 boss = any(dst.get(k) for k in ("boss", "maga", "subfinal", "final"))
-                chance = 1.0 if boss else 0.35       # jefes regalan seguro
+                chance = 1.0 if boss else 0.35       # a veces regala, a veces no
                 if random.random() < chance:
-                    n = 2 if boss else 1             # los jefes regalan 2 objetos
+                    n = 2 if boss else 1             # los jefes regalan 2 cosas
                     for _ in range(n):
-                        it = self._roll_drop(dst.get("lvl", 1))
-                        if it:
-                            it["qty"] += 1
-                            self.loot.append(it["name"])
+                        if random.random() < 0.5:    # regalo de ORO (extra)
+                            amt = random.randint(8, 20) + dst.get("lvl", 1) * 3
+                            self.gold_reward += amt
+                            self.loot.append(f"+{amt} oro")
+                        else:                        # regalo de OBJETO
+                            it = self._roll_drop(dst.get("lvl", 1))
+                            if it:
+                                it["qty"] += 1
+                                self.loot.append(it["name"])
         self.last_mult = mult
+        self.last_status = self._try_status(elem, dst, mult)
         return dmg
 
     def _roll_drop(self, lvl):
         """Objeto que suelta un enemigo (mejor según su nivel)."""
         if lvl >= 8:
-            pool = ["Mega Poción", "Super Éter", "Elixir", "Super Poción"]
+            pool = ["Mega Poción", "Super Éter", "Elixir", "Super Poción", "Remedio"]
         elif lvl >= 4:
-            pool = ["Super Poción", "Super Éter", "Poción", "Éter"]
+            pool = ["Super Poción", "Super Éter", "Poción", "Éter", "Remedio"]
         else:
-            pool = ["Poción", "Éter"]
+            pool = ["Poción", "Éter", "Remedio"]
         # objetos potentes solo si algún aliado ya tiene HP máx >= 100
         if not any(c["maxhp"] >= 100 for c in self.party):
             pool = [n for n in pool if n not in SUPER_GATED] or ["Poción"]
@@ -1724,14 +2468,57 @@ class Battle:
         return next((it for it in ITEMS if it["name"] == name), None)
 
     def _eff_tag(self):
+        t = ""
         if self.last_mult >= SUPER:
-            return "  ¡Súper efectivo!"
-        if self.last_mult <= WEAK:
-            return "  Poco efectivo..."
-        return ""
+            t = "  ¡Súper efectivo!"
+        elif self.last_mult <= WEAK:
+            t = "  Poco efectivo..."
+        if self.last_status:                   # el golpe aplicó un estado alterado
+            t += f"  ¡{self.last_status.capitalize()}!"
+            self.last_status = None
+        return t
+
+    # ---- efectos visuales (partículas + números flotantes) ----
+    def _pos_of(self, c):
+        """Posición en pantalla de un combatiente (sprite enemigo o panel aliado)."""
+        try:
+            if c.get("side") == "enemy":
+                i = self.enemies.index(c)
+                return (90 + i * 130, 90)
+            i = self.party.index(c)
+            pw = W // max(1, len(self.party))
+            return (i * pw + pw // 2, H - 55)
+        except ValueError:
+            return (W // 2, H // 2)
+
+    def fx_burst(self, c, col, n=14, up=False):
+        """Ráfaga de chispas en el combatiente (color del elemento del golpe)."""
+        x, y = self._pos_of(c)
+        for _ in range(n):
+            ang = random.uniform(0, 2 * math.pi)
+            sp = random.uniform(0.8, 3.2)
+            vy = -abs(math.sin(ang)) * sp - 1.2 if up else math.sin(ang) * sp
+            self.particles.append({"x": x, "y": y, "vx": math.cos(ang) * sp,
+                                   "vy": vy, "t": random.randint(18, 34),
+                                   "col": col, "r": random.randint(2, 4)})
+
+    def fx_float(self, c, txt, col, big=False):
+        """Número/texto flotante sobre el combatiente (-daño, +cura, estado)."""
+        x, y = self._pos_of(c)
+        self.floaters.append({"x": x + random.randint(-10, 10), "y": y - 20,
+                              "txt": str(txt), "col": col, "t": 46, "big": big})
+
+    def _play_hit(self, crit):
+        """Sonido de golpe con anti-saturación (golpes de área en el mismo frame)."""
+        now = pygame.time.get_ticks()
+        if now - self._hit_sfx_t > 60:
+            self._hit_sfx_t = now
+            sfx("crit" if crit else "hit")
 
     def _heal(self, dst, amt):
         dst["hp"] = min(dst["maxhp"], dst["hp"] + amt)
+        self.fx_burst(dst, GREEN, n=10, up=True)      # chispas verdes que suben
+        self.fx_float(dst, f"+{amt}", (140, 255, 160))
         return amt
 
     def do_attack(self, target):
@@ -1739,6 +2526,8 @@ class Battle:
         # elementos afectan también el golpe básico entre magas.
         roll = self._roll_hit(self.cur, target)
         if roll == "miss":
+            sfx("miss")
+            self.fx_float(target, "fallo", DIM)
             self._say(f"{self.cur['name']} falla el golpe contra {target['name']}")
             return
         d = self._damage(self.cur, target, 0, elem=self.cur.get("elem", "neutro"),
@@ -1755,14 +2544,21 @@ class Battle:
         if val < 0:
             amt = max(1, target["maxhp"] * (-val) // 100)   # cura por % de vida máx
             h = self._heal(target, amt)
-            self._say(f"{self.cur['name']} usa {name}: cura {h} a {target['name']}")
+            sfx("heal")
+            cured = ""
+            if target.get("status"):           # los poderes de CURA limpian estados
+                target["status"].clear()
+                cured = " y limpia sus estados"
+            self._say(f"{self.cur['name']} usa {name}: cura {h} a {target['name']}{cured}")
         elif val == 0:
+            sfx("guard")
             target["guard"] = True
             if target is self.cur:
                 self._say(f"{self.cur['name']} usa {name} y se protege")
             else:
                 self._say(f"{self.cur['name']} usa {name} y protege a {target['name']}")
         else:
+            sfx("power")
             extra = (self.pow_bonus if self.cur.get("side") == "hero" else 0) \
                 + wear_bonus(self.cur, "pow")
             d = self._damage(self.cur, target, val + extra)
@@ -1775,13 +2571,14 @@ class Battle:
         if self.cur["mp"] < cost:
             self._warn("¡MP insuficiente!"); return
         self.cur["mp"] -= cost
+        sfx("power")
         extra = (self.pow_bonus if self.cur.get("side") == "hero" else 0) \
             + wear_bonus(self.cur, "pow")
         es = list(self._alive("enemy"))
-        per = max(1, (val + extra) // max(1, len(es)))   # el golpe se REPARTE entre todos
+        n = max(1, len(es))                  # el golpe se REPARTE entre todos
         total = 0
         for en in es:
-            total += self._damage(self.cur, en, per)
+            total += self._damage(self.cur, en, val + extra, split=n)
         self._say(f"{self.cur['name']} lanza {name} a TODOS ({total}){self._eff_tag()}")
         if self.last_mult >= SUPER:
             self.push_comment("super", self.cur)
@@ -1796,27 +2593,46 @@ class Battle:
             item["qty"] -= 1
             tgt["alive"] = True
             tgt["hp"] = max(1, tgt["maxhp"] // 2)
+            tgt["status"] = {}
+            sfx("heal")
+            self.fx_burst(tgt, GOLD, n=16, up=True)
             self._say(f"¡{item['name']} revive a {tgt['name']}!")
             return
         if tgt.get("alive") is False:
             self._warn(f"{tgt['name']} está caído (usa Pluma Fénix)"); return
+        if item["kind"] == "cure":             # Remedio: limpia estados alterados
+            if not tgt.get("status"):
+                self._warn(f"{tgt['name']} no tiene estados alterados"); return
+            item["qty"] -= 1
+            cured = ", ".join(tgt["status"])
+            tgt["status"] = {}
+            sfx("heal")
+            self.fx_burst(tgt, (180, 240, 255), n=12, up=True)
+            self.fx_float(tgt, "¡Curado!", (180, 240, 255))
+            self._say(f"{tgt['name']} usa {item['name']}: ya no está {cured}")
+            return
         if item["kind"] == "hp" and tgt["hp"] >= tgt["maxhp"]:
             self._warn(f"{tgt['name']}: vida ya llena"); return
         if item["kind"] == "mp" and tgt["mp"] >= tgt["maxmp"]:
             self._warn(f"{tgt['name']}: maná ya lleno"); return
         item["qty"] -= 1
+        sfx("item")
         if item["kind"] == "hp":
             self._heal(tgt, item["amt"])
             self._say(f"{tgt['name']} usa {item['name']} (+{item['amt']} HP)")
         elif item["kind"] == "mp":
             tgt["mp"] = min(tgt["maxmp"], tgt["mp"] + item["amt"])
+            self.fx_float(tgt, f"+{item['amt']}", (140, 180, 255))
             self._say(f"{tgt['name']} usa {item['name']} (+{item['amt']} MP)")
-        else:                                  # Elixir: HP y MP al máximo
+        else:                                  # Elixir: HP y MP al máximo (+ estados)
             tgt["hp"] = tgt["maxhp"]; tgt["mp"] = tgt["maxmp"]
+            tgt["status"] = {}
+            self.fx_burst(tgt, GOLD, n=16, up=True)
             self._say(f"{tgt['name']} usa {item['name']} (¡recuperación total!)")
 
     def do_guard(self):
         self.cur["guard"] = True
+        sfx("guard")
         self._say(f"{self.cur['name']} se cubre")
 
     def try_flee(self):
@@ -1831,6 +2647,7 @@ class Battle:
         chance = max(25, min(90, 50 + int(ps - es) * 5))
         if random.randint(1, 100) <= chance:
             self.fled = True
+            sfx("flee")
             self.phase = "fled"
         else:
             self._say("¡No lograste huir!")     # falla -> pierdes el turno
@@ -1848,11 +2665,13 @@ class Battle:
     def do_combo(self, combo, members):
         for m in members:
             m["mp"] -= combo["cost"]
+        sfx("power")
         es = list(self._alive("enemy"))
-        per = max(1, combo["dmg"] // max(1, len(es)))    # el golpe se REPARTE entre todos
+        n = max(1, len(es))                  # el golpe se REPARTE entre todos
         total = 0
         for en in es:
-            total += self._damage(members[0], en, per, elem=combo["elem"])
+            total += self._damage(members[0], en, combo["dmg"],
+                                  elem=combo["elem"], split=n)
         names = "+".join(m["name"] for m in members)
         self._say(f"{names}: ¡{combo['name']}! ({total} a todos){self._eff_tag()}")
 
@@ -1860,6 +2679,7 @@ class Battle:
         """Triple concentrado en un solo enemigo (+60% de daño)."""
         for m in members:
             m["mp"] -= combo["cost"]
+        sfx("power")
         d = self._damage(members[0], target, int(combo["dmg"] * 1.6),
                          elem=combo["elem"])
         names = "+".join(m["name"] for m in members)
@@ -1926,6 +2746,9 @@ class Battle:
             cur["pot_hp"] -= 1
             heal = min(cur["maxhp"] - cur["hp"], cur["maxhp"] // 3 + 40)
             cur["hp"] += heal
+            sfx("item")
+            self.fx_burst(cur, GREEN, n=10, up=True)
+            self.fx_float(cur, f"+{heal}", (140, 255, 160))
             return f"bebe poción (+{heal}) [quedan {cur['pot_hp']}]"
         # POCIÓN de MP (limitada) si se quedó sin maná para sus poderes
         if (caster and cur.get("pot_mp", 0) > 0 and cur.get("powers")
@@ -1953,6 +2776,9 @@ class Battle:
                 amt = max(1, cur["maxhp"] * abs(val) // 100)
                 heal = min(cur["maxhp"] - cur["hp"], amt)
                 cur["hp"] += heal
+                sfx("heal")
+                self.fx_burst(cur, GREEN, n=10, up=True)
+                self.fx_float(cur, f"+{heal}", (140, 255, 160))
                 return f"{pn} (se cura +{heal})"
             if val == 0:                           # defensivo
                 cur["guard"] = True
@@ -1961,10 +2787,10 @@ class Battle:
             aoe = (not self._is_negro()) and (pn in AOE_POWERS or random.random() < 0.45)
             if aoe:                                # golpea a LOS 3 (daño REPARTIDO)
                 hs = list(self._alive("hero"))
-                per = max(1, val // max(1, len(hs)))
+                n = max(1, len(hs))          # el golpe se REPARTE entre el grupo
                 tot = 0
                 for h in hs:
-                    tot += self._damage(cur, h, per)
+                    tot += self._damage(cur, h, val, split=n)
                     if h.get("ai") and h["alive"] and random.random() < 0.3:
                         self.push_comment("hurt", h)
                 return f"¡{pn}! a TODOS ({tot}){self._eff_tag()}"
@@ -1986,12 +2812,17 @@ class Battle:
             self.phase = "lose"; return
         cur = self.cur
         name = cur["name"]
-        # acciones por turno: Negro 2-5; Mago Blanco final 2-4; maga según progreso
+        # jefe que HUYE (Negro del prólogo / 1er Mago Blanco): se retira antes de caer.
+        if cur.get("flees") and cur["hp"] < cur["maxhp"] * 0.35:
+            cur["alive"] = False               # se retira -> el combate termina (huyó)
+            self._say(f"{name} se retira entre sombras de luz...", then="next")
+            return
+        # acciones por turno: Negro 2-5; Mago Blanco final 1; maga según progreso
         # (1ª maga = 1; con 1+ magas liberadas = hasta 2); resto 1
         if self._is_negro():
             self._acts_left = random.randint(2, 5)
         elif cur.get("final"):
-            self._acts_left = random.randint(2, 4)
+            self._acts_left = 1                 # Blanco final: 1 acción por turno
         elif cur.get("maga"):
             self._acts_left = random.randint(1, cur.get("max_acts", 2))
         else:
@@ -2037,6 +2868,10 @@ class Battle:
         rt = k in (pygame.K_RIGHT, pygame.K_d)
         ok = k in (pygame.K_e, pygame.K_RETURN, pygame.K_SPACE)
         back = k in (pygame.K_ESCAPE, pygame.K_q)
+        if up or dn or lf or rt:
+            sfx("menu")
+        elif back:
+            sfx("cancel")
 
         if self.phase == "menu":
             if up: self.menu_i = (self.menu_i - 1) % len(self.menu)
@@ -2131,7 +2966,9 @@ class Battle:
                 it = ITEMS[self.sub_i]
                 pool = self._item_targets(it)
                 if not pool:
-                    self._warn("Sin caídos" if it["kind"] == "revive" else "Sin objetivo")
+                    self._warn("Sin caídos" if it["kind"] == "revive" else
+                               "Nadie tiene estados alterados" if it["kind"] == "cure"
+                               else "Sin objetivo")
                 elif len(pool) > 1:                 # varios -> elegir a quién
                     self.pend_item = it
                     self.phase = "itemtarget"; self.target_i = 0
@@ -2161,6 +2998,18 @@ class Battle:
             self.warn_t -= 1
         if self.shake_t > 0:
             self.shake_t -= 1
+        for p in self.particles:               # chispas: vuelan, caen y se apagan
+            p["x"] += p["vx"]; p["y"] += p["vy"]
+            p["vy"] += 0.12
+            p["t"] -= 1
+        self.particles[:] = [p for p in self.particles if p["t"] > 0]
+        for f in self.floaters:                # números flotantes: suben y se van
+            f["y"] -= 0.9
+            f["t"] -= 1
+        self.floaters[:] = [f for f in self.floaters if f["t"] > 0]
+        if self.phase in ("win", "lose") and not self._end_sfx:
+            self._end_sfx = True
+            sfx("win" if self.phase == "win" else "lose")
         if self.phase == "win" and not self._awarded:
             self._award_xp()
         if self.phase == "msg":
@@ -2180,6 +3029,11 @@ class Battle:
 
     # ---- dibujo ----
     def draw(self):
+        if self.phase != self._last_phase:     # nueva fase -> anima su panel
+            self._last_phase = self.phase
+            self._menu_anim = 8
+        elif self._menu_anim > 0:
+            self._menu_anim -= 1
         screen.fill((24, 20, 34))
         pygame.draw.rect(screen, (34, 30, 48), (0, 0, W, 180))
         # enemigos arriba
@@ -2190,23 +3044,29 @@ class Battle:
             y = 90 + oy
             if en["alive"]:
                 r = 46 if en.get("dragon") else 26
-                if en.get("dragon"):               # alas del dragón
-                    pygame.draw.polygon(screen, (255, 250, 210),
-                                        [(x - r, y), (x - r - 20, y - 16), (x - r - 12, y + 16)])
-                    pygame.draw.polygon(screen, (255, 250, 210),
-                                        [(x + r, y), (x + r + 20, y - 16), (x + r + 12, y + 16)])
-                pygame.draw.circle(screen, (255, 255, 255) if flash else en["color"],
-                                   (x, y), r)
-                pygame.draw.circle(screen, WHITE, (x, y), r, 2)
+                if en.get("dragon"):               # DRAGÓN DE TRES CABEZAS
+                    draw_dragon3(en["color"], x, y, r, flash=flash)
+                else:
+                    pygame.draw.circle(screen, (255, 255, 255) if flash else en["color"],
+                                       (x, y), r)
+                    pygame.draw.circle(screen, WHITE, (x, y), r, 2)
+                ra = r + 44 if en.get("dragon") else r   # flecha sobre las cabezas
                 if self.phase in ("target", "ptarget", "ctarget") and es \
                         and self.target_i < len(es) and es[self.target_i] is en:
                     pygame.draw.polygon(screen, GOLD,
-                                        [(x, y - r - 14), (x - 7, y - r - 26),
-                                         (x + 7, y - r - 26)])
+                                        [(x, y - ra - 14), (x - 7, y - ra - 26),
+                                         (x + 7, y - ra - 26)])
                 self._bar(x - 26, y + r + 6, 52, 5, en["hp"] / en["maxhp"],
                           hp_color(en["hp"] / en["maxhp"]))
                 draw_text(screen, f"Nv{en.get('lvl', 1)} {en['name']}",
                           x - 26, y + r + 14, font_xs, WHITE)
+                cx2 = x - 26                      # estados alterados del enemigo
+                for stn in en.get("status", {}):
+                    inf = STATUS_INFO.get(stn)
+                    if inf:
+                        draw_text(screen, inf["abbr"], cx2, y + r + 26,
+                                  font_xs, inf["col"])
+                        cx2 += font_xs.size(inf["abbr"])[0] + 6
         # héroes abajo (paneles)
         ph = 92
         pw = W // max(1, len(self.party))
@@ -2227,23 +3087,51 @@ class Battle:
             pygame.draw.rect(screen, GOLD if picked else (BOX_BORDER if hi else GRAY),
                              box, 3 if picked else 2, border_radius=6)
             c = hero["color"] if hero["alive"] else GRAY
-            pygame.draw.circle(screen, c, (box.x + 22, box.y + 24), 14)
+            pygame.draw.circle(screen, c, (box.x + 15, box.y + 13), 9)
+            # 1) nombre
             draw_text(screen, f"{hero['name']} Nv{hero.get('lvl', 1)}",
-                      box.x + 42, box.y + 8, font_md, WHITE)
+                      box.x + 30, box.y + 2, font_sm, WHITE)
+            # 2) modelo (debajo del nombre), recortado si es largo
             if hero.get("ai"):
-                ais = hero["ai"]["name"]
-                draw_text(screen, ais, box.right - font_xs.size(ais)[0] - 8,
-                          box.y + 10, font_xs, hero["ai"]["color"])
-            self._bar(box.x + 42, box.y + 30, box.w - 54, 7,
+                mdl = hero["ai"].get("model") or hero["ai"].get("name", "")
+                while mdl and font_xs.size(mdl)[0] > box.w - 16:
+                    mdl = mdl[:-1]
+                draw_text(screen, mdl, box.x + 8, box.y + 16, font_xs,
+                          hero["ai"].get("color", DIM))
+            # 3) HP
+            draw_text(screen, f"HP {hero['hp']}/{hero['maxhp']}", box.x + 8,
+                      box.y + 29, font_xs, WHITE)
+            self._bar(box.x + 8, box.y + 38, box.w - 16, 4,
                       hero["hp"] / hero["maxhp"], hp_color(hero["hp"] / hero["maxhp"]))
-            draw_text(screen, f"HP {hero['hp']}/{hero['maxhp']}", box.x + 42,
-                      box.y + 38, font_xs, WHITE)
-            self._bar(box.x + 42, box.y + 54, box.w - 54, 6,
+            # 4) MP
+            draw_text(screen, f"MP {hero['mp']}/{hero['maxmp']}", box.x + 8,
+                      box.y + 47, font_xs, WHITE)
+            self._bar(box.x + 8, box.y + 56, box.w - 16, 4,
                       (hero["mp"] / hero["maxmp"]) if hero["maxmp"] else 0, BLUE)
-            draw_text(screen, f"MP {hero['mp']}/{hero['maxmp']}", box.x + 42,
-                      box.y + 62, font_xs, WHITE)
+            # 5) XP
+            _nxt = xp_to_next(hero.get("lvl", 1))
+            draw_text(screen, f"XP {hero.get('xp', 0)}/{_nxt}", box.x + 8,
+                      box.y + 64, font_xs, (150, 170, 210))
+            self._bar(box.x + 8, box.y + 73, box.w - 16, 3,
+                      min(1.0, hero.get("xp", 0) / max(1, _nxt)), (120, 170, 240))
             if hero["guard"]:
-                draw_text(screen, "[Cubierto]", box.x + 42, box.y + 74, font_xs, GOLD)
+                draw_text(screen, "[Cub]", box.right - 34, box.y + 2, font_xs, GOLD)
+            sy = box.y + 13                    # estados alterados del aliado
+            for stn in hero.get("status", {}):
+                inf = STATUS_INFO.get(stn)
+                if inf:
+                    draw_text(screen, inf["abbr"], box.right - 34, sy,
+                              font_xs, inf["col"])
+                    sy += 11
+
+        # PARTÍCULAS (chispas elementales) y NÚMEROS FLOTANTES
+        for p in self.particles:
+            pygame.draw.circle(screen, p["col"], (int(p["x"]), int(p["y"])),
+                               max(1, p["r"] * p["t"] // 34))
+        for f in self.floaters:
+            fnt = font_md if f.get("big") else font_sm
+            draw_text(screen, f["txt"], int(f["x"]) - fnt.size(f["txt"])[0] // 2,
+                      int(f["y"]), fnt, f["col"])
 
         if self.phase == "menu":
             self._draw_menu(self.menu, self.menu_i, "Acción")
@@ -2292,7 +3180,8 @@ class Battle:
             screen.blit(s, (W // 2 - s.get_width() // 2, 200))
             draw_text(screen, "[E] continuar", W // 2 - 50, 240, font_sm, DIM)
         elif self.phase == "win":
-            panel = pygame.Rect(W // 2 - 230, 70, 460, 330)
+            oyw = -int((self._menu_anim / 8) ** 2 * 120)   # baja desde arriba
+            panel = pygame.Rect(W // 2 - 230, 70 + oyw, 460, 330)
             pygame.draw.rect(screen, BOX_BG, panel, border_radius=10)
             pygame.draw.rect(screen, GOLD, panel, 3, border_radius=10)
             s = font_lg.render("¡VICTORIA!", True, GOLD)
@@ -2360,7 +3249,8 @@ class Battle:
 
     def _draw_menu(self, opts, idx, title):
         bw, bh = 200, 30 + len(opts) * 24
-        box = pygame.Rect(W - bw - 16, 190, bw, bh)
+        ox = int((self._menu_anim / 8) ** 2 * 90)   # desliza desde la derecha
+        box = pygame.Rect(W - bw - 16 + ox, 190, bw, bh)
         pygame.draw.rect(screen, BOX_BG, box, border_radius=8)
         pygame.draw.rect(screen, BOX_BORDER, box, 3, border_radius=8)
         draw_text(screen, title, box.x + 14, box.y + 8, font_md, GOLD)
@@ -2453,38 +3343,468 @@ def party_select():
 # ============================================================
 #  IAs (avatares de Nerea) — asignadas a los magos de otro color
 # ============================================================
-# EDICIÓN OLLAMA: las IAs son MODELOS LOCALES de Ollama (el nombre mostrado ES el
-# modelo). Cámbialos por los que tengas con `ollama list`. RTX 4060 8GB -> 3B-8B.
-# 'name' == 'model' a propósito, para que la UI muestre solo modelos de Ollama.
+# Avatares de Nerea. Cada uno usa el modelo MÁS BARATO de su familia + su proveedor
+# (para enrutar en el backend de Nerea: POST /api/chat).
 AIS = [
-    {"name": "mistral",  "tag": "🦊", "color": (235, 130, 50),  "model": "mistral",  "provider": "ollama"},
-    {"name": "qwen3",    "tag": "🎀", "color": (235, 120, 180), "model": "qwen3",    "provider": "ollama"},
-    {"name": "llama3.1", "tag": "😈", "color": (90, 90, 110),   "model": "llama3.1", "provider": "ollama"},
-    {"name": "qwen2.5",  "tag": "✳️", "color": (210, 150, 90),  "model": "qwen2.5",  "provider": "ollama"},
-    {"name": "gemma3",   "tag": "🌀", "color": (40, 170, 140),  "model": "gemma3",   "provider": "ollama"},
-    {"name": "phi3",     "tag": "⚡", "color": (240, 200, 60),  "model": "phi3",     "provider": "ollama"},
-    {"name": "llama3.2", "tag": "♊", "color": (90, 140, 230),  "model": "llama3.2", "provider": "ollama"},
+    {"name": "Mistral", "tag": "🦊", "color": (235, 130, 50),  "model": "mistral-small-latest",     "provider": "mistral"},
+    {"name": "Qwen",    "tag": "🎀", "color": (235, 120, 180), "model": "qwen3-vl:235b-cloud",       "provider": "ollama"},
+    {"name": "Grok",    "tag": "😈", "color": (90, 90, 110),   "model": "grok-4-fast-non-reasoning", "provider": "xai"},
+    {"name": "Claude",  "tag": "✳️", "color": (210, 150, 90),  "model": "claude-haiku-4-5",          "provider": "anthropic"},
+    {"name": "GPT",     "tag": "🌀", "color": (40, 170, 140),  "model": "gpt-4o-mini",               "provider": "openai"},
+    {"name": "Groq",    "tag": "⚡", "color": (240, 200, 60),  "model": "openai/gpt-oss-20b",        "provider": "groq"},
+    {"name": "Gemini",  "tag": "♊", "color": (90, 140, 230),  "model": "gemini-2.5-flash-lite",     "provider": "gemini"},
 ]
-# Modelo que da voz al Mago Blanco y al Mago Negro (antes 'Claude').
-CLAUDE = AIS[3]   # qwen2.5
+CLAUDE = next(a for a in AIS if a["name"] == "Claude")   # voz por defecto de Blanco/Negro
+
+
+# ============================================================
+#  VARIOS SERVIDORES + API KEYS (se leen, guardan y ENCRIPTAN)
+#  Config COMPARTIDA con la edición Ollama (misma carpeta games/).
+#  - Escribe claves en  games/apikeys.txt  (proveedor=clave); al iniciar se LEEN,
+#    se guardan ENCRIPTADAS en apikeys.enc y el .txt se BORRA.
+#  - Elige modelos por servidor en  games/servers.json.
+#  Cifrado LOCAL (.keyfile): protege de texto plano, no de quien tenga ambos archivos.
+# ============================================================
+_KEYFILE = os.path.join(_DIR, ".keyfile")
+_KEYS_ENC = os.path.join(_DIR, "apikeys.enc")
+_KEYS_PLAIN = os.path.join(_DIR, "apikeys.txt")
+_SERVERS_CFG = os.path.join(_DIR, "servers.json")
+_UA = "Mozilla/5.0"                # algunos proveedores (Groq/Cloudflare) bloquean urllib
+# Modelos que NO sirven para chatear (imagen, audio, embeddings, etc.) o deprecados.
+_SKIP_MODEL = ("image", "imagine", "dall-e", "dalle", "flux", "stable-diffusion",
+               "sdxl", "diffusion", "embed", "whisper", "tts", "audio", "transcrib",
+               "voice", "realtime", "moderation", "rerank", "guard", "video", "veo",
+               "sora", "kling", "ocr", "deprecat", "lyria", "nano-banana",
+               "acestep", "clone_", ".wav", ".yaml", ".bak", ".json")
+# Modelos MUY ANTIGUOS / legacy que tampoco queremos en la lista.
+_OLD_MODEL = ("gpt-3", "davinci", "curie", "babbage",
+              "claude-1", "claude-2", "claude-instant",
+              "gemini-1.0", "gemini-1.5", "gemini-2.0", "gemini-pro", "bison", "palm",
+              "llama2", "llama-2", "mixtral", "mistral-tiny",
+              "gpt-4-32k", "gpt-4-vision",
+              "-0301", "-0314", "-0613", "-1106", "-0125")
+
+
+def _ok_model(mid):
+    """True si el modelo sirve para chat y NO es muy antiguo (descarta imagen/audio/
+    embeddings/deprecados y modelos legacy)."""
+    m = (mid or "").lower()
+    return bool(m) and not any(s in m for s in _SKIP_MODEL + _OLD_MODEL)
+
+
+_KEYS_TEMPLATE = (
+    "# Tus API keys (una por linea):  proveedor=clave\n"
+    "# Al iniciar el juego se leen, se GUARDAN ENCRIPTADAS y este archivo se BORRA.\n"
+    "# Proveedores: openai, groq, mistral, deepseek, openrouter, nvidia, anthropic, google\n"
+    "# Ejemplo:\n"
+    "# openai=sk-...\n"
+    "# nvidia=nvapi-...\n"
+    "# anthropic=sk-ant-...\n"
+    "# google=AIza...\n"
+)
+
+
+def _secret():
+    """Clave local para cifrar (32 bytes aleatorios, creada una sola vez)."""
+    try:
+        if os.path.exists(_KEYFILE):
+            with open(_KEYFILE, "rb") as f:
+                return f.read()
+        s = os.urandom(32)
+        with open(_KEYFILE, "wb") as f:
+            f.write(s)
+        try:
+            os.chmod(_KEYFILE, 0o600)
+        except Exception:
+            pass
+        return s
+    except Exception:
+        return b"nerea-rpg-fallback-secret-key-32b"
+
+
+def _keystream(secret, nonce, n):
+    out = bytearray()
+    ctr = 0
+    while len(out) < n:
+        out += hashlib.sha256(secret + nonce + ctr.to_bytes(8, "big")).digest()
+        ctr += 1
+    return bytes(out[:n])
+
+
+def encrypt_str(s):
+    secret = _secret()
+    nonce = os.urandom(16)
+    pt = s.encode("utf-8")
+    ct = bytes(a ^ b for a, b in zip(pt, _keystream(secret, nonce, len(pt))))
+    mac = hmac.new(secret, nonce + ct, hashlib.sha256).digest()
+    return base64.b64encode(nonce + mac + ct).decode("ascii")
+
+
+def decrypt_str(blob):
+    secret = _secret()
+    raw = base64.b64decode(blob)
+    nonce, mac, ct = raw[:16], raw[16:48], raw[48:]
+    if not hmac.compare_digest(mac, hmac.new(secret, nonce + ct, hashlib.sha256).digest()):
+        raise ValueError("clave corrupta o secreto cambiado")
+    pt = bytes(a ^ b for a, b in zip(ct, _keystream(secret, nonce, len(ct))))
+    return pt.decode("utf-8")
+
+
+def _load_enc_keys():
+    if not os.path.exists(_KEYS_ENC):
+        return {}
+    try:
+        with open(_KEYS_ENC, "r", encoding="utf-8") as f:
+            return json.loads(decrypt_str(f.read()))
+    except Exception:
+        return {}
+
+
+def _save_enc_keys(d):
+    try:
+        with open(_KEYS_ENC, "w", encoding="utf-8") as f:
+            f.write(encrypt_str(json.dumps(d)))
+        try:
+            os.chmod(_KEYS_ENC, 0o600)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _import_plain_keys():
+    """Importa apikeys.txt al store ENCRIPTADO y BORRA el texto plano. Crea plantilla."""
+    keys = _load_enc_keys()
+    if not os.path.exists(_KEYS_PLAIN):
+        try:
+            with open(_KEYS_PLAIN, "w", encoding="utf-8") as f:
+                f.write(_KEYS_TEMPLATE)
+        except Exception:
+            pass
+        return keys
+    added = False
+    try:
+        with open(_KEYS_PLAIN, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                prov, val = line.split("=", 1)
+                prov, val = prov.strip().lower(), val.strip()
+                if val:
+                    keys[prov] = val
+                    added = True
+    except Exception:
+        pass
+    if added:
+        _save_enc_keys(keys)
+        try:
+            with open(_KEYS_PLAIN, "w", encoding="utf-8") as f:
+                f.write(_KEYS_TEMPLATE)
+        except Exception:
+            pass
+        print(f"[Claves] {len(keys)} API key(s) guardadas ENCRIPTADAS; apikeys.txt limpiado.")
+    return keys
+
+
+def _load_nerea_keys():
+    """Lee las API keys desde el ALMACÉN DE NEREA (data/nerea_keys.json, cifrado
+    Fernet por máquina): la MISMA fuente que usa Nerea. Devuelve {provider: clave}."""
+    try:
+        from cryptography.fernet import Fernet
+    except Exception:
+        return {}
+    cand = [os.path.join(os.path.dirname(_DIR), "data", "nerea_keys.json"),
+            os.path.join(_DIR, "..", "data", "nerea_keys.json")]
+    path = next((p for p in cand if os.path.exists(p)), None)
+    if not path:
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception:
+        return {}
+    mid = (os.environ.get("COMPUTERNAME", "LOCAL")
+           + os.environ.get("USERNAME", "user")
+           + os.environ.get("USERPROFILE", "")).encode("utf-8", "replace")
+    try:
+        fer = Fernet(base64.urlsafe_b64encode(
+            hashlib.sha256(b"NEREA_KEYS_V2_SALT" + mid).digest()))
+    except Exception:
+        return {}
+
+    def _dec(v):
+        if not v or not str(v).startswith("ENC2:"):
+            return v or ""
+        try:
+            return fer.decrypt(v[5:].encode("ascii")).decode()
+        except Exception:
+            return ""
+    name2prov = {"NEREA_OPENAI_KEY": "openai", "NEREA_ANTHROPIC_KEY": "anthropic",
+                 "NEREA_GROQ_KEY": "groq", "NEREA_MISTRAL_KEY": "mistral",
+                 "NEREA_GEMINI_KEY": "google", "NEREA_XAI_KEY": "xai",
+                 "NEREA_NVIDIA_KEY": "nvidia"}
+    out = {}
+    for nm, prov in name2prov.items():
+        val = (os.environ.get(nm) or _dec(raw.get(nm, ""))).strip()
+        if val:
+            out[prov] = val
+    return out
+
+
+# La edición Nerea toma las claves del almacén de Nerea (principal) + apikeys.txt (extra).
+API_KEYS = {**_import_plain_keys(), **_load_nerea_keys()}
+print("[Claves] proveedores con API key:",
+      ", ".join(sorted(API_KEYS)) if API_KEYS else "(ninguna)")
+
+_DEFAULT_SERVERS = {
+    "ollama":     {"type": "ollama",    "url": os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat"), "models": []},
+    "localai":    {"type": "localai",   "url": os.getenv("LOCALAI_BASE", "http://localhost:8090").rstrip("/") + "/v1/chat/completions", "models": []},
+    "openai":     {"type": "openai",    "url": "https://api.openai.com/v1/chat/completions", "models": []},
+    "groq":       {"type": "openai",    "url": "https://api.groq.com/openai/v1/chat/completions", "models": []},
+    "mistral":    {"type": "openai",    "url": "https://api.mistral.ai/v1/chat/completions", "models": []},
+    "deepseek":   {"type": "openai",    "url": "https://api.deepseek.com/v1/chat/completions", "models": []},
+    "openrouter": {"type": "openai",    "url": "https://openrouter.ai/api/v1/chat/completions", "models": []},
+    "nvidia":     {"type": "openai",    "url": "https://integrate.api.nvidia.com/v1/chat/completions", "models": []},
+    "xai":        {"type": "openai",    "url": "https://api.x.ai/v1/chat/completions", "models": []},
+    "anthropic":  {"type": "anthropic", "url": "https://api.anthropic.com/v1/messages", "models": []},
+    "google":     {"type": "google",    "url": "https://generativelanguage.googleapis.com/v1beta/models", "models": []},
+}
+
+
+def _load_servers():
+    srv = {k: {**v, "models": list(v.get("models", []))} for k, v in _DEFAULT_SERVERS.items()}
+    if os.path.exists(_SERVERS_CFG):
+        try:
+            with open(_SERVERS_CFG, "r", encoding="utf-8") as f:
+                user = json.load(f)
+            for name, cfg in user.items():
+                if name.startswith("_") or not isinstance(cfg, dict):
+                    continue
+                base = srv.get(name, {"type": "openai", "url": "", "models": []})
+                base.update(cfg)
+                srv[name] = base
+        except Exception:
+            pass
+    else:
+        try:
+            with open(_SERVERS_CFG, "w", encoding="utf-8") as f:
+                json.dump({"_ayuda": "Pon la API key en apikeys.txt. models [] = TODOS los "
+                                     "modelos del proveedor; o lista solo los que quieras.",
+                           "openai": {"models": []},
+                           "groq": {"models": []},
+                           "nvidia": {"models": []},
+                           "anthropic": {"models": []},
+                           "google": {"models": []}},
+                          f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+    return srv
+
+
+SERVERS = _load_servers()
+
+
+def _server_models(name, srv, key):
+    """TODOS los modelos disponibles del proveedor, vía su endpoint /models."""
+    stype = srv.get("type")
+    try:
+        if stype in ("openai", "localai"):  # OpenAI/Groq/Mistral/DeepSeek/OpenRouter/NVIDIA/LocalAI
+            base = srv["url"].rsplit("/chat/completions", 1)[0]
+            req = urllib.request.Request(base + "/models",
+                                         headers={"Authorization": "Bearer " + (key or "sk-localai"),
+                                                  "User-Agent": _UA})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                d = json.loads(r.read().decode("utf-8"))
+            return [m["id"] for m in d.get("data", []) if _ok_model(m.get("id"))]
+        if stype == "anthropic":
+            base = srv["url"].rsplit("/messages", 1)[0]
+            req = urllib.request.Request(base + "/models",
+                  headers={"x-api-key": key, "anthropic-version": "2023-06-01",
+                           "User-Agent": _UA})
+            with urllib.request.urlopen(req, timeout=8) as r:
+                d = json.loads(r.read().decode("utf-8"))
+            return [m["id"] for m in d.get("data", []) if _ok_model(m.get("id"))]
+        if stype == "google":
+            greq = urllib.request.Request(srv["url"] + "?key=" + key + "&pageSize=200",
+                                          headers={"User-Agent": _UA})
+            with urllib.request.urlopen(greq, timeout=8) as r:
+                d = json.loads(r.read().decode("utf-8"))
+            out = []
+            for m in d.get("models", []):
+                nm = (m.get("name") or "").split("/")[-1]
+                if _ok_model(nm) and "generateContent" in (m.get("supportedGenerationMethods") or []):
+                    out.append(nm)
+            return out
+    except Exception as e:
+        print(f"[Nube] {name}: no se pudo listar modelos ({e})")
+        return []
+    return []
+
+
+def _cloud_ais():
+    """Avatares por cada modelo de NUBE con API key: usa los modelos LISTADOS en
+    servers.json o, si la lista está vacía, TODOS los del proveedor (auto-descubrir)."""
+    pal = [(60, 180, 120), (220, 120, 60), (120, 120, 220), (200, 80, 140), (80, 200, 200)]
+    out, i = [], 0
+    for name, srv in SERVERS.items():
+        key = API_KEYS.get(name)
+        if srv.get("type") == "localai":      # servidor local (Docker): sin API key
+            key = key or "sk-localai"
+        if name == "ollama" or not key:
+            continue
+        models = srv.get("models") or _server_models(name, srv, key)
+        print(f"[Nube] {name}: {len(models)} modelo(s)")
+        for m in models:
+            out.append({"name": m, "tag": "🔑", "color": pal[i % len(pal)],
+                        "model": m, "provider": name})
+            i += 1
+    return out
+
+
+def _post_json(url, payload, headers, timeout):
+    data = json.dumps(payload).encode("utf-8")
+    h = {"Content-Type": "application/json", "User-Agent": _UA}
+    h.update(headers)
+    rq = urllib.request.Request(url, data=data, headers=h)
+    with urllib.request.urlopen(rq, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def _llm_request(ai, sys_msg, user_msg):
+    """Enruta a un SERVIDOR de NUBE con API key (OpenAI/Anthropic/Google compat).
+    Devuelve texto o '' si falla / sin clave."""
+    model = ai.get("model", "")
+    provider = (ai.get("provider") or "").lower()
+    srv = SERVERS.get(provider)
+    if not srv:
+        return ""
+    stype = srv.get("type", "openai")
+    timeout = ai_timeout(ai)
+    is_qwen = "qwen" in model.lower()
+    key = API_KEYS.get(provider, "")
+    if stype == "localai":
+        key = key or "sk-localai"             # servidor local (Docker): sin API key
+    try:
+        if stype == "ollama":                  # servidor Ollama local (/api/chat)
+            payload = {"model": model, "stream": False,
+                       "messages": [{"role": "system", "content": sys_msg},
+                                    {"role": "user", "content": user_msg}],
+                       "options": {"num_predict": 1200 if is_qwen else 220,
+                                   "temperature": 0.8}}
+            out = _post_json(srv["url"], payload, {}, timeout)
+            return ((out.get("message") or {}).get("content")
+                    or (out.get("choices", [{}])[0].get("message", {}) or {}).get("content")
+                    or out.get("response") or "")
+        if stype in ("openai", "localai"):     # OpenAI / Groq / Mistral / DeepSeek / OpenRouter / NVIDIA / LocalAI
+            if not key:
+                return ""
+            payload = {"model": model, "temperature": 0.8,
+                       "max_tokens": 1200 if is_qwen else 300,
+                       "messages": [{"role": "system", "content": sys_msg},
+                                    {"role": "user", "content": user_msg}]}
+            out = _post_json(srv["url"], payload, {"Authorization": "Bearer " + key}, timeout)
+            return (out.get("choices", [{}])[0].get("message", {}) or {}).get("content", "")
+        if stype == "anthropic":
+            if not key:
+                return ""
+            payload = {"model": model, "max_tokens": 1200 if is_qwen else 400,
+                       "system": sys_msg,
+                       "messages": [{"role": "user", "content": user_msg}]}
+            out = _post_json(srv["url"], payload,
+                             {"x-api-key": key, "anthropic-version": "2023-06-01"}, timeout)
+            return "".join(b.get("text", "") for b in (out.get("content") or [])
+                           if b.get("type") == "text")
+        if stype == "google":
+            if not key:
+                return ""
+            url = f"{srv['url']}/{model}:generateContent?key={key}"
+            payload = {"contents": [{"role": "user",
+                                     "parts": [{"text": sys_msg + "\n\n" + user_msg}]}]}
+            out = _post_json(url, payload, {}, timeout)
+            cands = out.get("candidates") or []
+            if cands:
+                parts = (cands[0].get("content") or {}).get("parts") or []
+                return "".join(p.get("text", "") for p in parts)
+            return ""
+    except Exception:
+        return ""
+    return ""
+
+
+def _ollama_models_for_nerea():
+    """Lista los modelos LOCALES de Ollama (ollama list) para ofrecerlos también
+    en la versión Nerea. El chat sigue pasando por Nerea (provider 'ollama')."""
+    import urllib.request as _u
+    url = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat")
+    base = url.split("/api/")[0].split("/v1")[0].rstrip("/")
+    try:
+        with _u.urlopen(base + "/api/tags", timeout=3) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        return [m["name"] for m in data.get("models", [])
+                if m.get("name") and "embed" not in m["name"].lower()]
+    except Exception:
+        return []
+
+
+# Añade los modelos de Ollama instalados como IAs elegibles (además de los avatares).
+_OLL_PAL = [(120, 200, 120), (200, 90, 120), (90, 200, 200), (200, 200, 120),
+            (170, 130, 220), (120, 160, 230)]
+for _i, _m in enumerate(_ollama_models_for_nerea()):
+    if not any(a["model"] == _m for a in AIS):
+        AIS.append({"name": _m, "tag": "🤖", "color": _OLL_PAL[_i % len(_OLL_PAL)],
+                    "model": _m, "provider": "ollama"})
+
+for _ca in _cloud_ais():                    # modelos de NUBE con API key (se muestran también)
+    if not any(a["model"] == _ca["model"] and a.get("provider") == _ca["provider"] for a in AIS):
+        AIS.append(_ca)
+
+# Modelos que dan voz al Mago Blanco y al Mago Negro (elegibles en la pantalla de IAs).
+BLANCO_AI = CLAUDE
+NEGRO_AI = CLAUDE
 
 PERSONA_BLANCO = ("Eres el Mago Blanco. Ante el Mago Gris te muestras como un guía "
                   "bondadoso de la luz que solo quiere ayudar a liberar a las magas del "
-                  "Mago Negro. En secreto eres el verdadero villano y titiritero del "
-                  "Orden de los Dos Triángulos, pero NO lo reveles todavía.")
-PERSONA_NEGRO = ("Eres el Mago Negro, temido por todos como el tirano de los Dos "
-                 "Triángulos que poseyó a las seis magas. En realidad fuiste manipulado "
-                 "por el Mago Blanco y cargas su culpa: eres trágico y atormentado.")
+                  "Mago Negro. En secreto eres el verdadero villano: quisiste TODA la fe "
+                  "del mundo, así que poseíste a tu hermano el Mago Negro para fabricar "
+                  "un villano, encerraste con sus manos a las seis magas (las únicas que "
+                  "veían tus hilos) y escribiste la falsa profecía del mago sin color "
+                  "para que el Gris hiciera el trabajo sucio que tu luz no puede tocar "
+                  "sin delatarte. Cuando acabe, piensas deshacerte de él. "
+                  "NO reveles nada de esto todavía.")
+# El Negro POSEÍDO (aún no vencido 2 veces): se cree el villano y NO sabe que el
+# Blanco lo posee/manipula.
+PERSONA_NEGRO = ("Eres el Mago Negro, el tirano temido de los Dos Triángulos que poseyó "
+                 "a las seis magas. Te crees el verdadero amo y villano del Orden y actúas "
+                 "con crueldad y soberbia. IGNORAS por completo que tú también estás "
+                 "poseído y manipulado por el Mago Blanco: jamás lo mencionas ni lo sospechas.")
+# El Negro LIBERADO (tras la 2ª derrota = desposesión): descubre la verdad.
+PERSONA_NEGRO_LIBRE = ("Eres el Mago Negro, recién LIBERADO de la posesión del Mago Blanco: "
+                       "tu propio HERMANO, con quien sostenías el equilibrio de los Dos "
+                       "Triángulos. Él quiso toda la fe del mundo: te convirtió en su "
+                       "guante, encerró contigo a las seis magas del Consejo del Color y "
+                       "hasta la profecía del mago gris la escribió él. Estás atónito, "
+                       "arrepentido y furioso; ahora luchas del lado del Mago Gris contra "
+                       "el verdadero villano, tu hermano el Mago Blanco.")
 
-# ¿Se REVELÓ ya que el Mago Blanco es el villano? Las magas (y demás IAs aliadas)
-# SOLO lo saben en el tramo final, tras vencer al Mago Negro. Antes confían en él
-# como su guía y salvador. play_game mantiene este flag en sincronía con negro_done.
+# El JEFE SECRETO: reflejo sombrío del Mago Gris. Aparece en el hall al cumplir
+# las SEIS misiones secundarias. Habla como un espejo: lo conoce porque ES él.
+PERSONA_REFLEJO = ("Eres el Reflejo del Gris: la sombra especular del Mago Gris, "
+                   "nacida de todo lo que él calla. Hablas con su misma voz pero "
+                   "más fría; lo conoces por dentro y lo desafías a demostrar que "
+                   "merece su propia luz. No sirves al Blanco ni al Negro: solo "
+                   "existes para medirte con tu original en un duelo.")
+
+# ¿Se REVELÓ ya que el Mago Blanco es el villano? Las magas (y el propio Negro) SOLO
+# lo saben tras la 2ª derrota del Negro (su desposesión). play_game sincroniza el flag.
 TRUTH_REVEALED = False
 
 
 def claude_char(name, persona):
     """Personaje (Blanco/Negro) hablado por el modelo elegido para cada uno."""
     ai = BLANCO_AI if "Blanco" in name else NEGRO_AI
+    if "Negro" in name:                    # el Negro no sabe que el Blanco lo posee
+        persona = PERSONA_NEGRO_LIBRE if TRUTH_REVEALED else PERSONA_NEGRO
     return {"name": name, "ai": ai or CLAUDE, "persona": persona,
             "elem": "neutro", "lvl": 1}
 
@@ -2566,299 +3886,13 @@ def chat_fallback(elem):
     return random.choice(opts) if opts else "Estoy contigo. Sigamos."
 
 
-# EDICIÓN OLLAMA: hablamos DIRECTO a Ollama (sin backend de Nerea).
-OLLAMA_API = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat")
-
-# ============================================================
-#  VARIOS SERVIDORES + API KEYS (se leen, guardan y ENCRIPTAN)
-# ============================================================
-# - Escribe tus claves en  rpg_ollama_data/apikeys.txt  (proveedor=clave).
-# - Al iniciar se LEEN, se guardan ENCRIPTADAS en apikeys.enc y el .txt se BORRA.
-# - Define qué modelos usar por servidor en  rpg_ollama_data/servers.json.
-# NOTA: el cifrado es LOCAL (clave en .keyfile junto a los datos); protege de ojos
-# casuales / texto plano, no de alguien con acceso a ambos archivos.
-_KEYFILE = os.path.join(_BASE, ".keyfile")
-_KEYS_ENC = os.path.join(_BASE, "apikeys.enc")
-_KEYS_PLAIN = os.path.join(_BASE, "apikeys.txt")
-_SERVERS_CFG = os.path.join(_BASE, "servers.json")
-_KEYS_TEMPLATE = (
-    "# Tus API keys (una por linea):  proveedor=clave\n"
-    "# Al iniciar el juego se leen, se GUARDAN ENCRIPTADAS y este archivo se BORRA.\n"
-    "# Proveedores: openai, groq, mistral, deepseek, openrouter, anthropic, google\n"
-    "# Ejemplo:\n"
-    "# openai=sk-...\n"
-    "# anthropic=sk-ant-...\n"
-    "# google=AIza...\n"
-)
-
-
-def _secret():
-    """Clave local para cifrar (32 bytes aleatorios, creada una sola vez)."""
-    try:
-        if os.path.exists(_KEYFILE):
-            with open(_KEYFILE, "rb") as f:
-                return f.read()
-        s = os.urandom(32)
-        with open(_KEYFILE, "wb") as f:
-            f.write(s)
-        try:
-            os.chmod(_KEYFILE, 0o600)
-        except Exception:
-            pass
-        return s
-    except Exception:
-        return b"nerea-rpg-ollama-fallback-secret"
-
-
-def _keystream(secret, nonce, n):
-    out = bytearray()
-    ctr = 0
-    while len(out) < n:
-        out += hashlib.sha256(secret + nonce + ctr.to_bytes(8, "big")).digest()
-        ctr += 1
-    return bytes(out[:n])
-
-
-def encrypt_str(s):
-    secret = _secret()
-    nonce = os.urandom(16)
-    pt = s.encode("utf-8")
-    ct = bytes(a ^ b for a, b in zip(pt, _keystream(secret, nonce, len(pt))))
-    mac = hmac.new(secret, nonce + ct, hashlib.sha256).digest()
-    return base64.b64encode(nonce + mac + ct).decode("ascii")
-
-
-def decrypt_str(blob):
-    secret = _secret()
-    raw = base64.b64decode(blob)
-    nonce, mac, ct = raw[:16], raw[16:48], raw[48:]
-    if not hmac.compare_digest(mac, hmac.new(secret, nonce + ct, hashlib.sha256).digest()):
-        raise ValueError("clave corrupta o secreto cambiado")
-    pt = bytes(a ^ b for a, b in zip(ct, _keystream(secret, nonce, len(ct))))
-    return pt.decode("utf-8")
-
-
-def _load_enc_keys():
-    if not os.path.exists(_KEYS_ENC):
-        return {}
-    try:
-        with open(_KEYS_ENC, "r", encoding="utf-8") as f:
-            return json.loads(decrypt_str(f.read()))
-    except Exception:
-        return {}
-
-
-def _save_enc_keys(d):
-    try:
-        with open(_KEYS_ENC, "w", encoding="utf-8") as f:
-            f.write(encrypt_str(json.dumps(d)))
-        try:
-            os.chmod(_KEYS_ENC, 0o600)
-        except Exception:
-            pass
-    except Exception:
-        pass
-
-
-def _import_plain_keys():
-    """Importa apikeys.txt al store ENCRIPTADO y BORRA el texto plano. Crea plantilla."""
-    keys = _load_enc_keys()
-    if not os.path.exists(_KEYS_PLAIN):
-        try:
-            with open(_KEYS_PLAIN, "w", encoding="utf-8") as f:
-                f.write(_KEYS_TEMPLATE)
-        except Exception:
-            pass
-        return keys
-    added = False
-    try:
-        with open(_KEYS_PLAIN, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                prov, val = line.split("=", 1)
-                prov, val = prov.strip().lower(), val.strip()
-                if val:
-                    keys[prov] = val
-                    added = True
-    except Exception:
-        pass
-    if added:
-        _save_enc_keys(keys)
-        try:                                   # borra las claves en texto plano
-            with open(_KEYS_PLAIN, "w", encoding="utf-8") as f:
-                f.write(_KEYS_TEMPLATE)
-        except Exception:
-            pass
-        print(f"[Claves] {len(keys)} API key(s) guardadas ENCRIPTADAS; apikeys.txt limpiado.")
-    return keys
-
-
-API_KEYS = _import_plain_keys()
-
-# Servidores soportados (Ollama local + nubes compatibles). 'type' define el formato.
-_DEFAULT_SERVERS = {
-    "ollama":     {"type": "ollama",    "url": OLLAMA_API, "models": []},
-    "openai":     {"type": "openai",    "url": "https://api.openai.com/v1/chat/completions", "models": []},
-    "groq":       {"type": "openai",    "url": "https://api.groq.com/openai/v1/chat/completions", "models": []},
-    "mistral":    {"type": "openai",    "url": "https://api.mistral.ai/v1/chat/completions", "models": []},
-    "deepseek":   {"type": "openai",    "url": "https://api.deepseek.com/v1/chat/completions", "models": []},
-    "openrouter": {"type": "openai",    "url": "https://openrouter.ai/api/v1/chat/completions", "models": []},
-    "anthropic":  {"type": "anthropic", "url": "https://api.anthropic.com/v1/messages", "models": []},
-    "google":     {"type": "google",    "url": "https://generativelanguage.googleapis.com/v1beta/models", "models": []},
-}
-
-
-def _load_servers():
-    srv = {k: {**v, "models": list(v.get("models", []))} for k, v in _DEFAULT_SERVERS.items()}
-    if os.path.exists(_SERVERS_CFG):
-        try:
-            with open(_SERVERS_CFG, "r", encoding="utf-8") as f:
-                user = json.load(f)
-            for name, cfg in user.items():
-                if name.startswith("_") or not isinstance(cfg, dict):
-                    continue
-                base = srv.get(name, {"type": "openai", "url": "", "models": []})
-                base.update(cfg)
-                srv[name] = base
-        except Exception:
-            pass
-    else:
-        try:
-            with open(_SERVERS_CFG, "w", encoding="utf-8") as f:
-                json.dump({"_ayuda": "Pon la API key en apikeys.txt; aquí elige modelos por servidor.",
-                           "openai": {"models": ["gpt-4o-mini"]},
-                           "groq": {"models": ["llama-3.3-70b-versatile"]},
-                           "anthropic": {"models": ["claude-3-5-haiku-latest"]},
-                           "google": {"models": ["gemini-1.5-flash"]}},
-                          f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-    return srv
-
-
-SERVERS = _load_servers()
-
-
-def _cloud_ais():
-    """Avatares extra por cada modelo de un servidor de NUBE con API key cargada."""
-    pal = [(60, 180, 120), (220, 120, 60), (120, 120, 220), (200, 80, 140), (80, 200, 200)]
-    out, i = [], 0
-    for name, srv in SERVERS.items():
-        if name == "ollama" or not API_KEYS.get(name):
-            continue
-        for m in srv.get("models", []):
-            out.append({"name": m, "tag": "🔑", "color": pal[i % len(pal)],
-                        "model": m, "provider": name})
-            i += 1
-    return out
-
-
-def _post_json(url, payload, headers, timeout):
-    data = json.dumps(payload).encode("utf-8")
-    h = {"Content-Type": "application/json"}
-    h.update(headers)
-    rq = urllib.request.Request(url, data=data, headers=h)
-    with urllib.request.urlopen(rq, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8"))
-
-
-def _llm_request(ai, sys_msg, user_msg):
-    """Enruta al SERVIDOR del modelo (Ollama local o nube con API key).
-    Devuelve el texto de respuesta o '' si falla / sin clave."""
-    model = ai.get("model", "")
-    provider = (ai.get("provider") or "ollama").lower()
-    srv = SERVERS.get(provider) or SERVERS.get("ollama")
-    stype = srv.get("type", "ollama")
-    timeout = ai_timeout(ai)
-    is_qwen = "qwen" in model.lower()
-    try:
-        if stype == "ollama":
-            payload = {"model": model, "stream": False,
-                       "messages": [{"role": "system", "content": sys_msg},
-                                    {"role": "user", "content": user_msg}],
-                       "options": {"num_predict": 1200 if is_qwen else 220,
-                                   "temperature": 0.8}}
-            out = _post_json(srv["url"], payload, {}, timeout)
-            return ((out.get("message") or {}).get("content")
-                    or (out.get("choices", [{}])[0].get("message", {}) or {}).get("content")
-                    or out.get("response") or "")
-        key = API_KEYS.get(provider, "")
-        if not key:
-            return ""
-        if stype == "openai":                  # OpenAI / Groq / Mistral / DeepSeek / OpenRouter
-            payload = {"model": model, "temperature": 0.8,
-                       "max_tokens": 1200 if is_qwen else 300,
-                       "messages": [{"role": "system", "content": sys_msg},
-                                    {"role": "user", "content": user_msg}]}
-            out = _post_json(srv["url"], payload, {"Authorization": "Bearer " + key}, timeout)
-            return (out.get("choices", [{}])[0].get("message", {}) or {}).get("content", "")
-        if stype == "anthropic":
-            payload = {"model": model, "max_tokens": 1200 if is_qwen else 400,
-                       "system": sys_msg,
-                       "messages": [{"role": "user", "content": user_msg}]}
-            out = _post_json(srv["url"], payload,
-                             {"x-api-key": key, "anthropic-version": "2023-06-01"}, timeout)
-            return "".join(b.get("text", "") for b in (out.get("content") or [])
-                           if b.get("type") == "text")
-        if stype == "google":
-            url = f"{srv['url']}/{model}:generateContent?key={key}"
-            payload = {"contents": [{"role": "user",
-                                     "parts": [{"text": sys_msg + "\n\n" + user_msg}]}]}
-            out = _post_json(url, payload, {}, timeout)
-            cands = out.get("candidates") or []
-            if cands:
-                parts = (cands[0].get("content") or {}).get("parts") or []
-                return "".join(p.get("text", "") for p in parts)
-            return ""
-    except Exception:
-        return ""
-    return ""
-
-
-def ollama_installed_models():
-    """Consulta los modelos instalados en Ollama (equivale a 'ollama list').
-    Usa el endpoint HTTP /api/tags. Devuelve [] si Ollama no responde."""
-    base = OLLAMA_API.split("/api/")[0].split("/v1")[0].rstrip("/")
-    try:
-        with urllib.request.urlopen(base + "/api/tags", timeout=4) as r:
-            data = json.loads(r.read().decode("utf-8"))
-        # excluye modelos de EMBEDDINGS (no sirven para chatear)
-        return [m["name"] for m in data.get("models", [])
-                if m.get("name") and "embed" not in m["name"].lower()]
-    except Exception:
-        return []
-
-
-# Carga AUTÓNOMA: crea UN avatar por CADA modelo instalado en Ollama (todos),
-# para poder elegir cualquiera con ◄/►. Si Ollama no está, deja los por defecto.
-_PALETTE = [(235, 130, 50), (235, 120, 180), (90, 90, 110), (210, 150, 90),
-            (40, 170, 140), (240, 200, 60), (90, 140, 230), (200, 90, 120),
-            (120, 200, 120), (150, 150, 160)]
-_INSTALLED = ollama_installed_models()
-if _INSTALLED:
-    AIS = [{"name": m, "tag": "🤖", "color": _PALETTE[i % len(_PALETTE)],
-            "model": m, "provider": "ollama"} for i, m in enumerate(_INSTALLED)]
-    CLAUDE = AIS[min(3, len(AIS) - 1)]      # da voz al Mago Blanco/Negro
-    print(f"[Ollama] {len(_INSTALLED)} modelos detectados:", ", ".join(_INSTALLED))
-else:
-    print("[Ollama] no se detectaron modelos (¿'ollama serve' activo?); uso los por defecto.")
-
-_CLOUD = _cloud_ais()                       # modelos de NUBE con API key cargada
-if _CLOUD:
-    AIS = AIS + _CLOUD
-    print(f"[Nube] {len(_CLOUD)} modelo(s) con API key añadidos:",
-          ", ".join(f"{a['provider']}:{a['model']}" for a in _CLOUD))
-
-# Modelos que dan voz al Mago Blanco y al Mago Negro (elegibles en la pantalla de IAs).
-BLANCO_AI = CLAUDE
-NEGRO_AI = CLAUDE
+NEREA_API = os.getenv("NEREA_API", "http://localhost:8000/api/chat")
 
 
 def ask_companion_llm(companion, prompt, context=""):
-    """Llama al LLM de la maga DIRECTO a Ollama (POST /api/chat).
-    Si Ollama no responde, usa el respaldo predefinido (0 tokens)."""
+    """Llama al LLM REAL de la maga vía backend de Nerea (POST /api/chat).
+    Usa el modelo/proveedor del avatar. 'context' = situación del juego + NPCs.
+    Si el backend no responde, usa el respaldo predefinido (0 tokens)."""
     ai = companion.get("ai") or {}
     model = ai.get("model")
     if not model:
@@ -2889,9 +3923,10 @@ def ask_companion_llm(companion, prompt, context=""):
             "El Mago Negro te poseyó y encerró; el Mago Gris te liberó y ahora "
             f"viajas con él para liberar a las demás magas. {sobre_blanco}")
     sys_msg = rol + " " + reglas
+    # El rol va TAMBIÉN en el mensaje de usuario por si el backend ignora 'system'.
     user_msg = (f"[{rol}]\n[Estado del juego: {context}]\n"
                 f"{prompt}\nResponde en personaje, 1-2 frases, sin pedir contexto.")
-    # Enruta al servidor del modelo (Ollama local o nube con API key) y limpia <think>.
+    # EDICIÓN OLLAMA: enruta al servidor del modelo (Ollama local o nube con API key).
     txt = _strip_think((_llm_request(ai, sys_msg, user_msg) or "").strip())
     return txt or chat_fallback(companion.get("elem"))
 
@@ -2936,16 +3971,19 @@ class Chat:
 
 
 def ai_assign_screen():
-    """El usuario ELIGE qué IA controla a cada una de las 6 magas (por elemento).
-    Devuelve dict elem -> avatar IA. Claude se reserva para Blanco y Negro."""
+    """El usuario ELIGE qué IA/modelo da voz a cada maga + Mago Blanco + Mago Negro.
+    Devuelve dict elem -> avatar IA (y fija BLANCO_AI / NEGRO_AI)."""
     global BLANCO_AI, NEGRO_AI
-    # Filas: las 6 magas + Mago Blanco + Mago Negro. (label, elem, es_personaje)
-    rows = [(f"Maga de {ELEM_NAME[h['elem']]} ({h['name']})", h["elem"], False)
-            for h in HEROES]
-    rows.append(("Mago Blanco", "luz", True))
-    rows.append(("Mago Negro", "sombra", True))
+    # Filas: las 6 magas + Mago Blanco + Mago Negro. (label, elem)
+    rows = [(f"Maga de {ELEM_NAME[h['elem']]} ({h['name']})", h["elem"]) for h in HEROES]
+    rows.append(("Mago Blanco", "luz"))
+    rows.append(("Mago Negro", "sombra"))
     row = 0
-    ai_idx = [i % len(AIS) for i in range(len(rows))]
+    # default magas: fuego→Mistral, planta→Qwen, agua→Gemini, tierra→Groq, rayo→Grok,
+    # hielo→GPT; Blanco/Negro→Claude.
+    cidx = next((k for k, a in enumerate(AIS) if a["name"] == "Claude"), 0)
+    ai_idx = [(x if x < len(AIS) else 0) for x in [0, 1, 6, 5, 2, 4]][:len(HEROES)]
+    ai_idx += [cidx, cidx]
     while True:
         clock.tick(FPS)
         poll_stick()
@@ -2982,11 +4020,11 @@ def ai_assign_screen():
                 return {HEROES[i]["elem"]: AIS[ai_idx[i]]
                         for i in range(len(HEROES))}
         screen.fill(BLACK)
-        draw_text(screen, "Elige el MODELO de cada personaje", 24, 8, font_lg, GOLD)
-        draw_text(screen, "Up/Down personaje | Left/Right modelo | ENTER/Start empezar",
+        draw_text(screen, "Elige la IA / modelo de cada personaje", 24, 8, font_lg, GOLD)
+        draw_text(screen, "Up/Down personaje | Left/Right IA | ENTER/Start empezar",
                   24, 38, font_xs, DIM)
         rowh = 50
-        for i, (label, el, _p) in enumerate(rows):
+        for i, (label, el) in enumerate(rows):
             ai = AIS[ai_idx[i]]
             y = 62 + i * rowh
             box = pygame.Rect(20, y, W - 40, rowh - 6)
@@ -3121,6 +4159,7 @@ _LVL_STATS = [("HP", "maxhp", "HP"), ("MP", "maxmp", "MP"), ("ATK", "atk", "ATK"
 
 def levelup_screen(ev):
     """Subida de nivel paso a paso: base -> puntos obtenidos -> resultado sumado."""
+    sfx("levelup")
     c = ev["char"]
     g = ev["gains"]
     # mode: 'base' muestra base, 'gain' muestra base (+obtenido), 'sum' muestra total
@@ -3308,13 +4347,81 @@ def _draw_shot(motif, t, fade, cx, cy, cols):
             rr = 64 + 18 * math.sin(t / 250.0 + k)
             pygame.draw.circle(screen, c0,
                                (cx + int(rr * math.cos(a)), cy + int(rr * math.sin(a))), 7)
-    elif motif == "triangle":                   # el Orden de los Dos Triángulos
+    elif motif == "triangle":                   # el Orden de los Dos Triángulos: uno DENTRO de otro
         pygame.draw.circle(screen, (28, 24, 40), (cx, cy), 90)
-        sz = 30 + int(6 * math.sin(t / 400.0))
+        sz = 34 + int(6 * math.sin(t / 400.0))
+        # triángulo EXTERIOR (grande, claro) apuntando hacia arriba
         pygame.draw.polygon(screen, (160, 160, 165),
                             [(cx, cy - sz), (cx - sz, cy + sz), (cx + sz, cy + sz)], 3)
+        # triángulo INTERIOR: misma orientación, centrado y más chico
+        h = sz // 2
         pygame.draw.polygon(screen, (110, 90, 140),
-                            [(cx, cy + sz), (cx - sz, cy - sz), (cx + sz, cy - sz)], 1)
+                            [(cx, cy - sz // 3), (cx - h, cy + (2 * sz) // 3),
+                             (cx + h, cy + (2 * sz) // 3)], 2)
+    elif motif == "bros":                       # los DOS HERMANOS en equilibrio
+        pygame.draw.circle(screen, (26, 24, 40), (cx, cy), 92)
+        sw = 6 * math.sin(t / 500.0)
+        s = 32
+        lx, rx = cx - 54, cx + 54
+        pygame.draw.line(screen, (110, 110, 130), (lx, cy), (rx, cy), 1)
+        pygame.draw.polygon(screen, (238, 238, 244),          # Blanco: apice arriba
+                            [(lx, cy - s + sw), (lx - s, cy + s + sw),
+                             (lx + s, cy + s + sw)], 3)
+        pygame.draw.polygon(screen, (152, 132, 192),          # Negro: apice abajo
+                            [(rx, cy + s - sw), (rx - s, cy - s - sw),
+                             (rx + s, cy - s - sw)], 3)
+    elif motif == "council":                    # el CONSEJO DEL COLOR
+        s = 19
+        pygame.draw.polygon(screen, (238, 238, 244),
+                            [(cx, cy - s), (cx - s, cy + s), (cx + s, cy + s)], 2)
+        pygame.draw.polygon(screen, (152, 132, 192),
+                            [(cx, cy + s), (cx - s, cy - s), (cx + s, cy - s)], 2)
+        for k, cc in enumerate(_SIX_COLS):
+            a = ang * 0.5 + k * (2 * math.pi / 6)
+            rr = 84 + 8 * math.sin(t / 380.0 + k)
+            pygame.draw.circle(screen, cc,
+                               (cx + int(rr * math.cos(a)),
+                                cy + int(rr * math.sin(a))), 13)
+    elif motif == "strings":                    # el TITIRITERO: hilos de luz
+        hx, hy = cx, cy - 88                                  # la mano de luz
+        pygame.draw.circle(screen, (255, 250, 210), (hx, hy), 15)
+        pygame.draw.circle(screen, (255, 255, 255), (hx, hy), 15, 2)
+        sway = int(math.sin(t / 420.0) * 15)
+        px, py = cx + sway, cy + 46                           # el titere (hermano)
+        for dx in (-24, 0, 24):
+            pygame.draw.line(screen, (236, 230, 255),
+                             (hx, hy + 12), (px + dx, py - 24), 1)
+        pygame.draw.circle(screen, (58, 40, 88), (px, py), 25)
+        pygame.draw.circle(screen, (152, 132, 192), (px, py), 25, 2)
+        for ex in (-9, 9):                                    # grita, no rie
+            pygame.draw.circle(screen, (228, 60, 60), (px + ex, py - 6), 3)
+    elif motif == "chains":                     # las SEIS MAGAS encerradas
+        for k, cc in enumerate(_SIX_COLS):
+            a = k * (2 * math.pi / 6) + ang * 0.15
+            rr = 56 + fade * 64
+            ox, oy = cx + int(rr * math.cos(a)), cy + int(rr * math.sin(a))
+            for j in (1, 2, 3):                               # eslabones
+                pygame.draw.circle(screen, (104, 96, 126),
+                                   (cx + int(rr * j / 4.0 * math.cos(a)),
+                                    cy + int(rr * j / 4.0 * math.sin(a))), 3, 1)
+            pygame.draw.circle(screen,
+                               tuple(int(v * (1.0 - 0.6 * fade)) for v in cc),
+                               (ox, oy), 13)
+        pygame.draw.circle(screen, (28, 22, 42), (cx, cy), 26)
+    elif motif == "quill":                      # la PROFECIA falsa, tinta fresca
+        sc = pygame.Rect(cx - 116, cy - 44, 232, 88)
+        pygame.draw.rect(screen, (238, 232, 210), sc, border_radius=6)
+        pygame.draw.rect(screen, (188, 172, 138), sc, 2, border_radius=6)
+        n = int(min(1.0, t / 1700.0) * 192)                   # la tinta AVANZA
+        for j in (0, 1, 2):
+            wln = max(0, min(n - j * 38, 192 - j * 26))
+            if wln > 0:
+                pygame.draw.line(screen, (42, 34, 30),
+                                 (sc.x + 20, sc.y + 26 + j * 20),
+                                 (sc.x + 20 + wln, sc.y + 26 + j * 20), 2)
+        qx = sc.x + 20 + min(192, n)                          # la pluma
+        pygame.draw.line(screen, (250, 250, 255), (qx, sc.y + 22), (qx + 15, sc.y - 22), 3)
+        pygame.draw.circle(screen, (255, 250, 210), (qx + 15, sc.y - 22), 4)
     elif motif == "throne":                     # trono dorado coronado de luz
         cray = cols[1] if len(cols) > 1 else c0
         for k in range(14):
@@ -3368,6 +4475,74 @@ def ending_cinematic(ekey):
         draw_text(screen, ("[Enter] terminar" if last else "[Enter] continuar")
                   + f"   ({si + 1}/{len(scenes)})", W - 220, H - 20, font_sm, DIM)
         if fade < 1.0:                       # velo de transición entre tomas
+            veil = pygame.Surface((W, H)); veil.fill((0, 0, 0))
+            veil.set_alpha(int((1 - fade) * 200)); screen.blit(veil, (0, 0))
+        present()
+
+
+# ============================================================
+#  INTRO ANIMADA (apertura): el origen del Orden y el engano del Blanco
+# ============================================================
+INTRO_TITLE = "EL ORDEN DE LOS DOS TRIANGULOS"
+INTRO_COLS = [(238, 238, 244), (152, 132, 192), (255, 240, 160)]
+INTRO_SHOTS = [
+    ("bros", "Al principio, los Dos Triángulos eran HERMANOS: el Blanco, luz del "
+             "día; el Negro, la sombra que trae el descanso. Ninguno reinaba solo."),
+    ("council", "Con ellos se sentaban seis magas —el Consejo del Color— y el "
+                "mundo tenía todos sus colores."),
+    ("strings", "Pero el Blanco quiso TODA la fe del mundo. Y la luz no puede "
+                "conquistar sin dejar de ser luz... así que fabricó un villano: "
+                "poseyó a su propio hermano."),
+    ("chains", "Con las manos del Negro encerró a las seis magas, las únicas que "
+               "veían sus hilos. El color se apagó y el miedo llenó los templos."),
+    ("quill", "Después escribió una profecía: «un mago sin color romperá el "
+              "sello». La tinta aún estaba fresca."),
+    ("gray", "Y así, viajero gris, el mundo entero reza por tu victoria... "
+             "también quien te envía. Ninguno sabe para qué."),
+]
+
+
+def intro_cinematic():
+    """Cinemática de apertura. [Enter] avanza de toma, [ESC] o B la salta."""
+    si, t = 0, 0
+    cx, cy = W // 2, H // 2 - 28
+    while True:
+        dt = clock.tick(FPS)
+        t += dt
+        adv = False
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT:
+                pygame.quit(); sys.exit()
+            if e.type == pygame.KEYDOWN and e.key == pygame.K_F11:
+                toggle_fullscreen(); continue
+            if (e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE) or \
+               (e.type == pygame.JOYBUTTONDOWN and e.button in (1, 6)):
+                return                                  # SALTAR la intro
+            if (e.type == pygame.KEYDOWN and e.key in
+                    (pygame.K_e, pygame.K_RETURN, pygame.K_SPACE)) or \
+               (e.type == pygame.JOYBUTTONDOWN and e.button in (0, 7)):
+                adv = True
+        if adv and t > 500:
+            si += 1
+            if si >= len(INTRO_SHOTS):
+                return
+            t = 0
+        motif, text = INTRO_SHOTS[si]
+        fade = min(1.0, t / 900.0)
+        screen.fill((6, 6, 14))
+        _draw_shot(motif, t, fade, cx, cy, INTRO_COLS)
+        ts = font_lg.render(INTRO_TITLE, True, GOLD)
+        screen.blit(ts, (cx - ts.get_width() // 2, 24))
+        by = H - 96
+        pygame.draw.rect(screen, (12, 12, 22), (24, by, W - 48, 70), border_radius=6)
+        pygame.draw.rect(screen, (90, 90, 130), (24, by, W - 48, 70), 1, border_radius=6)
+        for j, ln in enumerate(wrap(text, font_sm, W - 84)):
+            screen.blit(font_sm.render(ln, True, WHITE), (40, by + 12 + j * 18))
+        last = si == len(INTRO_SHOTS) - 1
+        draw_text(screen, ("[Enter] comenzar" if last else "[Enter] seguir")
+                  + f"  ({si + 1}/{len(INTRO_SHOTS)})   [ESC] saltar",
+                  W - 320, H - 20, font_sm, DIM)
+        if fade < 1.0:
             veil = pygame.Surface((W, H)); veil.fill((0, 0, 0))
             veil.set_alpha(int((1 - fade) * 200)); screen.blit(veil, (0, 0))
         present()
@@ -3498,20 +4673,22 @@ def _menu_nav(e, idx, n):
     if e.type == pygame.JOYHATMOTION:
         _, hy = e.value
         if hy == 1:
-            return (idx - 1) % n, None
+            sfx("menu"); return (idx - 1) % n, None
         if hy == -1:
-            return (idx + 1) % n, None
+            sfx("menu"); return (idx + 1) % n, None
     if e.type == pygame.JOYBUTTONDOWN:
-        return idx, ("ok" if e.button in (0, 7) else "back")
+        act = "ok" if e.button in (0, 7) else "back"
+        sfx("confirm" if act == "ok" else "cancel")
+        return idx, act
     if e.type == pygame.KEYDOWN:
         if e.key in (pygame.K_UP, pygame.K_w):
-            return (idx - 1) % n, None
+            sfx("menu"); return (idx - 1) % n, None
         if e.key in (pygame.K_DOWN, pygame.K_s):
-            return (idx + 1) % n, None
+            sfx("menu"); return (idx + 1) % n, None
         if e.key in (pygame.K_RETURN, pygame.K_e, pygame.K_SPACE):
-            return idx, "ok"
+            sfx("confirm"); return idx, "ok"
         if e.key in (pygame.K_ESCAPE, pygame.K_q):
-            return idx, "back"
+            sfx("cancel"); return idx, "back"
     return idx, None
 
 
@@ -3678,7 +4855,7 @@ def options_menu():
 
 
 def main_menu():
-    rows = ["Nueva partida", "Continuar", "Opciones", "Salir"]
+    rows = ["Nueva partida", "Continuar", "Ver intro", "Opciones", "Salir"]
     idx = 0
     while True:
         clock.tick(FPS)
@@ -3694,6 +4871,7 @@ def main_menu():
                 if idx == 0:
                     slot = choose_slot("Nueva partida — elige ranura")
                     if slot:
+                        intro_cinematic()    # apertura animada (ESC la salta)
                         res = play_game(slot, None)
                         while res == "dead":         # moriste -> recarga el último guardado
                             res = play_game(slot, load_slot(slot))
@@ -3704,8 +4882,10 @@ def main_menu():
                         while res == "dead":
                             res = play_game(slot, load_slot(slot))
                 elif idx == 2:
-                    options_menu()
+                    intro_cinematic()        # volver a verla cuando quieras
                 elif idx == 3:
+                    options_menu()
+                elif idx == 4:
                     pygame.quit(); sys.exit()
         screen.fill((12, 12, 24))
         _ttl = "EL VIAJE DEL MAGO"
@@ -3725,8 +4905,8 @@ def level_to(c, target):
     """Sube a un combatiente hasta 'target' aplicando mejoras y poderes por nivel."""
     while c["lvl"] < target:
         c["lvl"] += 1
-        c["maxhp"] += 8; c["hp"] += 8
-        c["maxmp"] += 3; c["mp"] += 3
+        c["maxhp"] += 8; c["maxmp"] += 3
+        c["hp"] = c["maxhp"]; c["mp"] = c["maxmp"]   # subir de nivel: cura TOTAL de HP y MP
         c["atk"] += 2; c["df"] += 1
         c["agu"] = c.get("agu", 10) + 1
         if c["lvl"] % 2 == 0:
@@ -3815,6 +4995,9 @@ def play_game(slot, saved):
     negro_prologue = saved.get("negro_prologue", False) if saved else False
     extra_allies = saved.get("extra_allies", []) if saved else []   # Negro aliado
     dead_enemies = set(saved.get("dead_enemies", [])) if saved else set()
+    # misiones secundarias: {reino: {"st": 0/1/2, "n": progreso de caza}}
+    quest_st = {k: dict(v) for k, v in saved.get("quests", {}).items()} if saved else {}
+    secret_done = saved.get("secret_done", False) if saved else False   # jefe secreto
     ending_key = "_"
 
     def rebuild_party():
@@ -3848,6 +5031,27 @@ def play_game(slot, saved):
         toast = "El Mago Negro apareció en la sala. Háblale o enfréntalo."
         toast_t = 2800
 
+    def all_quests_done():
+        return all(quest_st.get(el, {}).get("st") == 2 for el in WORLD_ORDER)
+
+    def spawn_secret_boss():
+        """JEFE SECRETO: si cumpliste las SEIS misiones secundarias, tu propio
+        REFLEJO aparece en el hall (al entrar o al cargar). Es OPCIONAL: puedes
+        hablarle (E) dos veces para luchar. Si lo vences, no reaparece."""
+        nonlocal toast, toast_t
+        if loc != "hub" or secret_done or not all_quests_done():
+            return
+        if any(e.get("secret") and e["alive"] for e in rt["enemies"]):
+            return                              # ya está en la sala
+        cxh, cyh = rt["w"] // 2, rt["h"] // 2
+        rt["enemies"].append({"x": cxh - 3, "y": cyh - 6, "elem": "neutro",
+                              "boss": True, "secret": True, "kind": "boss",
+                              "name": "Reflejo del Gris", "alive": True,
+                              "color": (85, 85, 100)})
+        log_ctx("un reflejo sombrío del Mago Gris apareció en el hall")
+        toast = "Algo con tu rostro te espera en el hall..."
+        toast_t = 2800
+
     loc = start_loc
     rt = get_stage(loc)
     for _en in rt["enemies"]:               # enemigos ya derrotados no reaparecen
@@ -3869,12 +5073,16 @@ def play_game(slot, saved):
     dx = dy = 0
     state = "overworld"                        # overworld, dialog, battle, ending
     dialog = DialogBox()
+    dialog_queue = []          # diálogos ENCADENADOS (p.ej. Visiones del Gris)
     chat = Chat()
     battle = None
     last_enemy = None
     toast = ""
     toast_t = 0
     fade_t = 0                 # fundido de entrada (transición de pantalla)
+    fade_mode = "fade"         # tipo de entrada: "fade" (alfa) o "iris" (círculo)
+    amb_parts = []             # partículas ambientales del mapa actual
+    amb_theme = None           # tema para el que se generaron
     gold = gold0
     # contexto vivido (lo que comparten las IAs): se restaura del save; nuevo = vacío
     log = list(saved.get("log", [])) if saved else []
@@ -3891,6 +5099,7 @@ def play_game(slot, saved):
         return estado + " Últimos hechos: " + " | ".join(log[-6:])
 
     spawn_hall_negro()         # si CARGAS directamente en el hall con 3 magas liberadas
+    spawn_secret_boss()        # si CARGAS con las 6 misiones secundarias cumplidas
 
     owned = owned0
     equipped = equipped0
@@ -3901,6 +5110,8 @@ def play_game(slot, saved):
     def use_item_on(it, who):
         if it["qty"] <= 0:
             return "No te quedan"
+        if it["kind"] == "cure":               # los estados solo existen EN combate
+            return "Nadie tiene estados alterados (solo ocurren en combate)"
         if it["kind"] == "hp" and who["hp"] >= who["maxhp"]:
             return f"{who['name']} ya tiene la vida llena"
         if it["kind"] == "mp" and who["mp"] >= who["maxmp"]:
@@ -3967,6 +5178,8 @@ def play_game(slot, saved):
             "last_bond": last_bond, "negro_redeemed": negro_redeemed,
             "negro_prologue": negro_prologue, "extra_allies": extra_allies,
             "dead_enemies": list(dead_enemies),
+            "quests": quest_st,
+            "secret_done": secret_done,
             "gold": gold, "loc": loc, "px": px, "py": py, "log": log,
         }
 
@@ -4070,19 +5283,42 @@ def play_game(slot, saved):
         return [seq[min(len(seq) - 1, i * GAP)] for i in range(n)]
 
     def goto(key, spawn):
-        nonlocal loc, rt, px, py, trail, fade_t, vis_x, vis_y, comp_vis, toast, toast_t
-        fade_out()                 # transición de salida (funde a negro)
+        nonlocal loc, rt, px, py, trail, fade_t, fade_mode
+        nonlocal vis_x, vis_y, comp_vis, toast, toast_t
+        # posición del jugador en pantalla (para centrar el iris en él)
+        camx, camy = calc_cam(vis_x, vis_y, rt["w"], rt["h"])
+        sx = int(vis_x * TILE + TILE // 2 - camx)
+        sy = int(vis_y * TILE + TILE // 2 - camy + HUD_H)
+        # TIPO de transición según el viaje:
+        #  - entre ETAPAS del mismo mundo ("elem:0" -> "elem:1"): BARRIDO lateral
+        #  - entre MUNDOS, casas, hub y arco final: IRIS centrado en el jugador
+        op, np_ = loc.split(":"), key.split(":")
+        if (len(op) == 2 and len(np_) == 2 and op[0] == np_[0]
+                and op[1].isdigit() and np_[1].isdigit()):
+            fwd = int(np_[1]) > int(op[1])
+            wipe_out("right" if fwd else "left")
+            fade_mode = "wipe_r" if fwd else "wipe_l"
+        else:
+            iris_out(sx, sy)
+            fade_mode = "iris"
         loc = key
         rt = get_stage(key)
         px, py = spawn
         vis_x, vis_y = float(px), float(py)    # sin glide al teletransportar
         comp_vis = []                          # re-encaja a las magas en el nuevo mapa
         trail = [(px, py)] * 16
-        fade_t = FADE_MS           # transición de entrada (aparece desde negro)
+        fade_t = FADE_MS           # transición de entrada (se abre/revela)
+        # AUTOGUARDADO al cambiar de zona (checkpoint automático; si caes en
+        # combate, revives aquí). Se omite en las escenas finales.
+        if not key.startswith("end:"):
+            if save_slot(slot, save_data()):
+                toast = "· Autoguardado ·"
+                toast_t = 900
         for en in rt["enemies"]:   # enemigos ya derrotados NO reaparecen
             if f"{key}#{en.get('eid')}" in dead_enemies:
                 en["alive"] = False
         spawn_hall_negro()         # PRIMER ENCUENTRO forzado con el Mago Negro
+        spawn_secret_boss()        # JEFE SECRETO (6 misiones secundarias cumplidas)
         # ÁNGEL raro (~5%): aparece en un stage de combate y cura al grupo al máximo
         combat_stage = key in _FIN_BUILDERS or (
             ":" in key and "house" not in key and not key.startswith("end:"))
@@ -4095,7 +5331,7 @@ def play_game(slot, saved):
                                   "text": "Recibe mi luz, Mago Gris."})
 
     def start_battle(world_en):
-        nonlocal battle, state, fade_t
+        nonlocal battle, state, fade_t, fade_mode
         # nivel del JEFE de este mundo = FIJO por progreso: 1º=5, 2º=10, 3º=15...
         tier = 5 + sum(world_done.values()) * 5
 
@@ -4124,8 +5360,8 @@ def play_game(slot, saved):
             blanco = mk("Mago Blanco", "luz", 700, 34, 22, 14, lv)
             blanco["powers"] = list(WHITE_MAGE["powers"])
             blanco["maxmp"] = blanco["mp"] = 100
-            blanco["pot_hp"] = blanco["pot_mp"] = 6
-            blanco["final"] = True             # caster, 2-4 acciones, XP de jefe final
+            blanco["pot_hp"] = blanco["pot_mp"] = 0   # sin recargas
+            blanco["final"] = True             # caster, 1 acción por turno, XP de jefe final
             foes = [blanco]
             xp_base, gold_r = 150, 500
         elif world_en.get("dragon"):
@@ -4135,11 +5371,12 @@ def play_game(slot, saved):
             foes = [drg]
             xp_base, gold_r = 140, 350
         elif world_en.get("prologue"):
-            # primer encuentro en el hall: SIEMPRE +3 sobre el MAYOR del grupo
-            lv = plvl + 3
+            # PRIMER encuentro en el hall: +2 sobre el mayor del grupo (más suave)
+            lv = plvl + 2
             neg = mk("Mago Negro", "sombra", 80 + lv * 6, 12, 9, 10, lv)
             _arm_negro(neg, 60)                # poderes + MP + 6 pociones
             neg["prologue"] = True             # 1ª batalla del Negro: XP por encima de lo normal
+            neg["flees"] = True                # huye antes de caer (sigue poseído)
             foes = [neg]
             xp_base, gold_r = 45, 90
         elif world_en.get("subfinal"):
@@ -4149,6 +5386,28 @@ def play_game(slot, saved):
             neg["subfinal"] = True             # 2ª batalla del Negro: MUCHA XP
             foes = [neg]
             xp_base, gold_r = 100, 160
+        elif world_en.get("blanco1"):
+            # 1er enfrentamiento del Mago Blanco: HUYE antes de caer (aún no es el final)
+            lv = max(30, plvl + 4)
+            bl = mk("Mago Blanco", "luz", 300, 24, 16, 13, lv)
+            bl["powers"] = list(WHITE_MAGE["powers"])
+            bl["maxmp"] = bl["mp"] = 80
+            bl["blanco1"] = True; bl["flees"] = True
+            foes = [bl]
+            xp_base, gold_r = 90, 150
+        elif world_en.get("secret"):
+            # JEFE SECRETO: el Reflejo del Gris. Usa TUS poderes de neutro (todos
+            # los desbloqueados a su nivel), actúa hasta 2 veces y lleva pociones.
+            lv = plvl + 8
+            ref = mk("Reflejo del Gris", "neutro", 560, 28, 17, 13, lv)
+            ref["powers"] = [("Golpe Arcano", 6, 24)] + [
+                p for req, p in LEVEL_POWERS["neutro"] if req <= lv]
+            ref["maxmp"] = ref["mp"] = 120
+            ref["pot_hp"] = ref["pot_mp"] = 6
+            ref["secret"] = True
+            ref["max_acts"] = 2
+            foes = [ref]
+            xp_base, gold_r = 160, 600
         elif world_en.get("maga"):
             el = world_en["maga"]
             m = MAGA_BY_ELEM[el]
@@ -4180,7 +5439,7 @@ def play_game(slot, saved):
             pool = AMBIENT.get(WORLD_THEME.get(el, ""), [world_en["name"]])
             foes = []
             for _ in range(n):
-                lv = max(1, plvl + random.randint(-3, 1))   # tu nivel -3 .. +1
+                lv = max(1, plvl + random.randint(-2, 1))   # tu nivel -3 .. +1
                 foes.append(mk(random.choice(pool), el, 40, 12, 7, 7, lv))
             xp_base, gold_r = 9 * n, 12 * n
         else:
@@ -4189,7 +5448,7 @@ def play_game(slot, saved):
             pool = AMBIENT.get(WORLD_THEME.get(el, ""), [])
             foes = []
             for k in range(n):
-                lv = max(1, plvl + random.randint(-3, 1))   # niveles MEZCLADOS (-3..+1)
+                lv = max(1, plvl + random.randint(-2, 1))   # niveles MEZCLADOS (-3..+1)
                 kind = random.random()                      # personajes MEZCLADOS
                 if kind < 0.3:
                     foes.append(mk("Mago " + ELEM_NAME[el], el, 46, 12, 8, 6, lv))
@@ -4199,7 +5458,7 @@ def play_game(slot, saved):
                     foes.append(mk("Acólito " + ELEM_NAME[el], el, 28, 9, 5, 8, lv))
             if not any("Mago" in f["name"] or "Acólito" in f["name"] for f in foes):
                 foes[0] = mk("Acólito " + ELEM_NAME[el], el, 28, 9, 5, 8,
-                             max(1, plvl + random.randint(-3, 1)))   # al menos 1 secuaz
+                             max(1, plvl + random.randint(-2, 1)))   # al menos 1 secuaz
             xp_base, gold_r = 14 + 8 * n, 20 + 10 * n
         battle = Battle(party, foes, armor_def=eqbonus("Armadura", "df"),
                         atk_bonus=eqbonus("Arma", "atk"), pow_bonus=eqbonus("Foco", "pow"))
@@ -4213,16 +5472,19 @@ def play_game(slot, saved):
                 base = 200
             elif f.get("prologue"):     # Mago Negro, 1ª batalla
                 base = 140
+            elif f.get("secret"):       # Reflejo del Gris (jefe secreto)
+                base = 230
             elif f.get("maga"):         # maga poseída
                 base = 70
             else:
                 base = 10               # enemigo simple
-            return int(base * (1 + 0.15 * (f["lvl"] - 1)))
+            return int(base * (1 + 0.14 * (f["lvl"] - 1)))   # REBALANCEO: antes 0.15
         # XP TOTAL = suma de TODOS los enemigos (5 dan mucho más que 1)
         battle.xp_reward = sum(foe_xp(f) for f in foes)
         battle.gold_reward = gold_r
-        fade_out()                 # transición a la batalla
-        fade_t = FADE_MS           # la batalla aparece desde negro
+        battle_swirl()             # ETAPA -> BATALLA: espiral de salida...
+        fade_mode = "swirl"        # ...y la batalla GIRA hacia dentro
+        fade_t = FADE_MS
         state = "battle"
 
     while True:
@@ -4274,7 +5536,8 @@ def play_game(slot, saved):
         # la respuesta de la IA llegó (puede tardar hasta 20 min): mostrarla
         if chat.text and not chat.busy and state == "overworld":
             who = chat.who
-            dialog.open(f"{who['name']} [{who['ai']['name']}]", chat.text)
+            _wai = who.get("ai") or {}
+            dialog.open(f"{who['name']} [{_wai.get('name', 'IA')}]", chat.text)
             chat.text = ""
             state = "dialog"
 
@@ -4313,7 +5576,11 @@ def play_game(slot, saved):
                 if e.type == pygame.KEYDOWN and e.key in (pygame.K_e, pygame.K_RETURN, pygame.K_SPACE):
                     dialog.advance()
                     if not dialog.active:
-                        state = "overworld"
+                        if dialog_queue:       # hay diálogos encadenados (visiones)
+                            sp, tx = dialog_queue.pop(0)
+                            dialog.open(sp, tx)
+                        else:
+                            state = "overworld"
             elif state == "battle":
                 battle.handle(e)
                 if e.type == pygame.KEYDOWN and battle.phase in ("win", "lose") \
@@ -4328,18 +5595,31 @@ def play_game(slot, saved):
                             toast = (f"+{battle.gold_reward} oro  +{battle.xp_given} XP"
                                      + ("  ¡NIVEL!" if ups else ""))
                             toast_t = 1300
+                            # progreso de misión de CAZA de este reino
+                            _qel = loc.split(":")[0] if ":" in loc else ""
+                            _qs = quest_st.get(_qel)
+                            if (_qs and _qs["st"] == 1 and not last_enemy.get("boss")
+                                    and SIDE_QUESTS.get(_qel, {}).get("type") == "caza"):
+                                _qs["n"] += 1
+                                if _qs["n"] == SIDE_QUESTS[_qel]["goal"]:
+                                    toast += "  ¡Caza completa: vuelve con " \
+                                             + SIDE_QUESTS[_qel]["npc"] + "!"
                             log_ctx(f"venciste a {last_enemy['name']}")
                         for ev in ups:                  # animación de subida de nivel
                             levelup_screen(ev)
                         for c in party:                 # revive aliados caídos (30% HP)
+                            c["status"] = {}            # los estados NO salen del combate
                             if not c["alive"] or c["hp"] <= 0:
                                 c["alive"] = True
                                 c["hp"] = max(1, c["maxhp"] // 3)
                         if last_enemy and last_enemy.get("prologue"):
-                            negro_prologue = True       # huye; aún no es el jefe final
-                            dialog.open("Mago Negro", "Je... te subestimé, Gris. Aún no "
-                                        "es el momento. Libera a las demás magas y ven a "
-                                        "mi guarida... si te atreves a saber la verdad.")
+                            negro_prologue = True       # huye; SIGUE poseído (no lo sabe)
+                            battle_swirl(steps=14)      # BATALLA -> ETAPA (con diálogo)
+                            fade_mode = "swirl"
+                            fade_t = FADE_MS
+                            dialog.open("Mago Negro", "Je... más fuerte de lo que creía, "
+                                        "Gris. Pero no pienso caer hoy. Libera a las magas "
+                                        "si puedes; en mi guarida acabaré contigo.")
                             state = "dialog"
                         elif last_enemy and last_enemy.get("final"):
                             ch = choice_screen(
@@ -4353,7 +5633,7 @@ def play_game(slot, saved):
                                 best_val = affinity[best_el]
                                 if negro_redeemed:             # perdón -> FINAL FELIZ
                                     ending_key = "feliz"
-                                elif shadow > 0 and shadow >= max(best_val, balance):
+                                elif shadow > 0 and shadow > max(best_val, balance):
                                     ending_key = "oscuro"
                                 elif best_val > 0 and best_val > balance:
                                     tied = [e for e in affinity if affinity[e] == best_val]
@@ -4365,28 +5645,40 @@ def play_game(slot, saved):
                             goto(ek, get_stage(ek)["spawn"])
                             toast = "Camina hacia la luz..."; toast_t = 2000
                             state = "overworld"
+                        elif last_enemy and last_enemy.get("blanco1"):
+                            # 1er Mago Blanco HUYÓ -> te manda su dragón; sigues al vendedor
+                            goto("f5", get_stage("f5")["spawn"])
+                            dialog.open("Mago Blanco", "Vaya, liberaste a mi marioneta "
+                                        "oscura... da igual: ya hiciste lo que tu 'profecía' "
+                                        "mandaba. Sí, la escribí yo. Toda la fe del mundo "
+                                        "será mía, y tú eras la mano sin color que mi luz "
+                                        "necesitaba. Mi dragón te detendrá. ¡Jamás llegarás "
+                                        "a mi trono, Gris!")
+                            state = "dialog"
                         elif last_enemy and last_enemy.get("dragon"):
-                            # vencido el dragón -> el Mago Blanco huye al santuario (f5)
-                            goto("f5", (1, BIG[1] // 2))
-                            toast = "El Mago Blanco huye al Santuario de la Luz..."
+                            # vencido el dragón -> el Mago Blanco FINAL aguarda en su trono
+                            goto("f7", get_stage("f7")["spawn"])
+                            toast = "El Mago Blanco te espera en su santuario..."
                             toast_t = 2400
                             state = "overworld"
                         elif last_enemy and last_enemy.get("subfinal"):
                             negro_done = True
                             TRUTH_REVEALED = True       # ya pueden saberlo las magas
                             ch = choice_screen(
-                                "Has vencido al Mago Negro. Tras su máscara ves miedo, "
-                                "no maldad: también él fue una víctima.",
+                                "Rompes el hechizo: el Mago Negro cae de rodillas, "
+                                "DESPOSEÍDO. 'Mi hermano...', murmura. 'Me convirtió en "
+                                "su villano para que el mundo solo rezara hacia arriba. "
+                                "Las magas veían sus hilos: por eso las encerró conmigo.'",
                                 ["Matarlo y absorber su poder oscuro",
                                  "Perdonarlo y que se una a ti"],
-                                body="El verdadero amo te espera más allá. Tu decisión "
-                                     "marcará en quién te conviertes.")
+                                body="El verdadero amo, el Mago Blanco, te espera más allá. "
+                                     "Tu decisión marcará en quién te conviertes.")
                             if ch == 0:                       # MATAR -> absorbe poderes
                                 shadow += 4
                                 for p in BLACK_MAGE["powers"]:
                                     if p not in gris["powers"]:
                                         gris["powers"].append(p)
-                                goto("f4", (1, BIG[1] // 2))
+                                goto("f4", get_stage("f4")["spawn"])
                                 dialog.open("Mago Gris", "Absorbes su poder oscuro. "
                                             "(Aprendiste todos sus hechizos de sombra) "
                                             "Una sombra crece en ti...")
@@ -4394,14 +5686,35 @@ def play_game(slot, saved):
                             else:                             # PERDONAR -> se une
                                 negro_redeemed = True; balance += 2
                                 black = make_combatant(BLACK_MAGE)
+                                black["ai"] = NEGRO_AI or CLAUDE   # voz para poder hablarle
+                                black["persona"] = PERSONA_NEGRO_LIBRE
                                 level_to(black, 5 + sum(world_done.values()) * 5)
                                 extra_allies.append(black)
                                 rebuild_party()
-                                goto("f4", (1, BIG[1] // 2))
+                                goto("f4", get_stage("f4")["spawn"])
                                 dialog.open("Mago Negro", "¡El hechizo se rompió! Soy "
                                             "libre. Voy contigo contra el verdadero "
                                             "villano: el Mago Blanco.")
                                 state = "dialog"
+                        elif last_enemy and last_enemy.get("secret"):
+                            # JEFE SECRETO vencido: botín único + mejora PERMANENTE
+                            secret_done = True
+                            gold += 800
+                            for _nm in ("Elixir", "Elixir", "Pluma Fénix"):
+                                next(i for i in ITEMS
+                                     if i["name"] == _nm)["qty"] += 1
+                            gris["maxhp"] += 40
+                            gris["hp"] = gris["maxhp"]
+                            gris["atk"] += 4
+                            gris["df"] += 3
+                            balance += 2        # integrar tu sombra = equilibrio
+                            log_ctx("el Mago Gris venció a su propio reflejo")
+                            dialog.open("Reflejo del Gris",
+                                        "...No viniste a destruirme: viniste a "
+                                        "mirarme. Toma lo que soy; también es tuyo. "
+                                        "(+40 HP máx  +4 ATQ  +3 DEF  +800 oro  "
+                                        "2 Elixires  1 Pluma Fénix)")
+                            state = "dialog"
                         elif last_enemy and last_enemy.get("maga"):
                             elem = last_enemy["maga"]
                             world_done[elem] = True
@@ -4421,7 +5734,7 @@ def play_game(slot, saved):
                                 body=speech + "  ¿Qué haces ahora? "
                                 "Tu decisión moldeará el destino del mundo.")
                             if ch == 0:
-                                affinity[elem] += 2; last_bond = elem
+                                affinity[elem] += 4; last_bond = elem
                                 dec = "Caminaréis juntos."
                             elif ch == 1:
                                 balance += 2; dec = "Su pueblo reconstruirá el reino."
@@ -4436,13 +5749,26 @@ def play_game(slot, saved):
                             toast = (f"¡{mg} liberada! {dec} Vuelve caminando y "
                                      "visita las casas por sus regalos.")
                             toast_t = 2200
+                            fade_out()                  # de las pantallas de decisión
+                            fade_mode = "fade"          # ...al mundo con el diálogo
+                            fade_t = FADE_MS
                             dialog.open(mg, reaction + " " + dec)   # texto post-rescate
+                            # VISIÓN DEL GRIS: un fragmento de la verdad tras cada
+                            # liberación (foreshadowing del Mago Blanco)
+                            n_lib = sum(world_done.values())
+                            if 1 <= n_lib <= len(VISIONS):
+                                dialog_queue.append(("Visión", VISIONS[n_lib - 1]))
+                                log_ctx("el Gris tuvo una visión: hilos de luz "
+                                        "moviendo al Mago Negro")
                             chat.ask(roster[-1],
                                      prompt="El Mago Gris acaba de liberarte de la "
                                      "posesión del Mago Negro. Reacciona y únete a él.",
                                      context=world_context())
                             state = "dialog"
                         else:
+                            battle_swirl(steps=14)   # BATALLA -> ETAPA: espiral
+                            fade_mode = "swirl"      # el mundo gira hacia dentro
+                            fade_t = FADE_MS
                             state = "overworld"
                     else:                       # DERROTA -> vuelves al ÚLTIMO GUARDADO
                         if load_slot(slot):     # hay guardado -> el menú lo recarga
@@ -4490,7 +5816,7 @@ def play_game(slot, saved):
                             toast_t = 1100
                         elif kind == "item":
                             if gold >= price:
-                                gold -= price; ref["qty"] += 1
+                                gold -= price; ref["qty"] += 1; sfx("gold")
                                 toast = f"Compraste {ref['name']}"
                             else:
                                 toast = "Te falta oro"
@@ -4506,7 +5832,7 @@ def play_game(slot, saved):
                             elif owner["lvl"] < acc.get("lvl", 1):
                                 toast = f"Requiere que suba a nivel {acc['lvl']}"
                             elif gold >= price:
-                                gold -= price; owned_wear.add(ref)
+                                gold -= price; owned_wear.add(ref); sfx("gold")
                                 toast = f"Compraste {ref}"
                             else:
                                 toast = "Te falta oro"
@@ -4518,7 +5844,7 @@ def play_game(slot, saved):
                             elif gris["lvl"] < need:
                                 toast = f"Requiere nivel {need}"
                             elif gold >= price:
-                                gold -= price; owned[kind].add(ref)
+                                gold -= price; owned[kind].add(ref); sfx("gold")
                                 toast = f"Compraste {label}"
                             else:
                                 toast = "Te falta oro"
@@ -4708,6 +6034,65 @@ def play_game(slot, saved):
                             chat.ask(claude_char(tk["name"], tk["ai_persona"]),
                                      prompt="El Mago Gris se acerca a hablar contigo.",
                                      context=world_context())
+                        elif tk and tk.get("minigame"):
+                            if MINIGAMES is None:
+                                dialog.open(tk["name"], "(Falta minigames.py "
+                                            "junto a rpg.py; sin él no puedo "
+                                            "ofrecerte mi juego.)")
+                            else:
+                                mg_oro, mg_txt = MINIGAMES.play(
+                                    tk["minigame"], _mg_ctx())
+                                gold += mg_oro
+                                if mg_oro:
+                                    toast = f"+{mg_oro} oro del mini-juego"
+                                    toast_t = 1600
+                                    sfx("gold")
+                                dialog.open(tk["name"], mg_txt)
+                                log_ctx(f"jugó {MINIGAMES.NOMBRE.get(tk['minigame'], 'un mini-juego')}"
+                                        f" y ganó {mg_oro} oro")
+                            state = "dialog"
+                        elif tk and tk.get("quest"):
+                            # NPC de MISIÓN: aceptar / ver progreso / cobrar
+                            qel = tk["quest"]
+                            q = SIDE_QUESTS[qel]
+                            qs = quest_st.setdefault(qel, {"st": 0, "n": 0})
+                            give = False
+                            if qs["st"] == 0:                    # aceptar misión
+                                qs["st"] = 1
+                                txt = q["ask"]
+                            elif qs["st"] == 2:                  # ya cumplida
+                                txt = q["done"]
+                            elif q["type"] == "caza":            # en curso: caza
+                                if qs["n"] >= q["goal"]:
+                                    qs["st"] = 2; txt = q["turn"]; give = True
+                                else:
+                                    txt = q["wip"].format(n=qs["n"], goal=q["goal"])
+                            else:                                # en curso: entrega
+                                it = next(i for i in ITEMS if i["name"] == q["item"])
+                                if it["qty"] >= q["goal"]:
+                                    it["qty"] -= q["goal"]
+                                    qs["st"] = 2; txt = q["turn"]; give = True
+                                else:
+                                    txt = q["wip"].format(n=it["qty"], goal=q["goal"])
+                            if give:                             # recompensa
+                                r = q["reward"]
+                                gold += r.get("gold", 0)
+                                extra = f"+{r.get('gold', 0)} oro"
+                                if r.get("item"):
+                                    next(i for i in ITEMS
+                                         if i["name"] == r["item"])["qty"] += 1
+                                    extra += f"  +1 {r['item']}"
+                                toast = "¡Misión cumplida!  " + extra
+                                toast_t = 1800
+                                sfx("gold")
+                                if all_quests_done() and not secret_done:
+                                    dialog_queue.append(("???",
+                                        "Seis favores, seis reinos... El espejo "
+                                        "del Nexo se ha quebrado. Algo con tu "
+                                        "rostro te aguarda en el hall, Mago Gris."))
+                            dialog.open(tk["name"], txt)
+                            log_ctx(f"{tk['name']} dijo: {txt}")
+                            state = "dialog"
                         elif tk:
                             welem = tk.get("welem")
                             if tk.get("scout"):            # pista DINÁMICA / liberado
@@ -4738,15 +6123,16 @@ def play_game(slot, saved):
                             men = next((en for en in enemies if en["alive"]
                                         and (en["x"], en["y"]) == (fx, fy)
                                         and (en.get("maga") or en.get("subfinal")
-                                             or en.get("final") or en.get("prologue"))),
+                                             or en.get("final") or en.get("prologue")
+                                             or en.get("secret"))),
                                        None)
                             cps = comp_positions()
                             ci = next((i for i, p in enumerate(cps)
                                        if p == (fx, fy)), None)
                             if men and not chat.busy:
                                 men["talks"] = men.get("talks", 0) + 1
-                                # maga: 3ª charla -> combate; Negro/Blanco: 2ª charla -> combate
-                                if men["talks"] >= (3 if men.get("maga") else 2):
+                                # todos los jefes: hablas 1 vez y a la 2ª charla -> combate
+                                if men["talks"] >= 2:
                                     last_enemy = men
                                     start_battle(men)
                                 elif men.get("maga"):
@@ -4766,6 +6152,13 @@ def play_game(slot, saved):
                                     chat.ask(claude_char("Mago Negro", PERSONA_NEGRO),
                                              prompt="El Mago Gris te confronta antes de "
                                              "la batalla. Háblale.", context=world_context())
+                                elif men.get("secret"):          # Reflejo (Claude)
+                                    chat.ask(claude_char("Reflejo del Gris",
+                                                         PERSONA_REFLEJO),
+                                             prompt="El Mago Gris te confronta en el "
+                                             "hall del Nexo. Háblale como su espejo "
+                                             "antes del duelo.",
+                                             context=world_context())
                                 else:                            # Mago Blanco (Claude)
                                     chat.ask(claude_char("Mago Blanco", PERSONA_BLANCO),
                                              prompt="El Mago Gris ha llegado hasta tu "
@@ -4780,7 +6173,9 @@ def play_game(slot, saved):
                             chat.ask(companions()[idx], context=world_context())
 
         # glide visual hacia la casilla actual (transición suave al caminar)
-        _step = dt / 95.0                       # ~1 casilla cada 95 ms
+        # el glide dura lo MISMO que el cooldown de paso (move_ms): así el mago y
+        # las magas avanzan de forma CONTINUA, sin pausa al llegar a cada casilla.
+        _step = dt / max(1.0, float(OPTS.get("move_ms", 120)))
         if abs(px - vis_x) <= _step:
             vis_x = float(px)
         else:
@@ -4882,6 +6277,7 @@ def play_game(slot, saved):
                             if cst["got"] or (cst["x"], cst["y"]) != (px, py):
                                 continue
                             cst["got"] = True
+                            sfx("gold")
                             if cst["kind"] == "gold":
                                 gold += cst["val"]
                                 toast = f"¡Tesoro oculto! +{cst['val']} oro"
@@ -4951,8 +6347,12 @@ def play_game(slot, saved):
         elif state == "battle":
             battle.update()
             if battle.phase == "fled":          # huiste -> de vuelta al mundo
+                battle_swirl(steps=14)          # BATALLA -> ETAPA: espiral
+                fade_mode = "swirl"             # el mundo gira hacia dentro
+                fade_t = FADE_MS
                 state = "overworld"
                 for c in party:                 # revive aliados caídos al escapar
+                    c["status"] = {}            # los estados NO salen del combate
                     if not c["alive"] or c["hp"] <= 0:
                         c["alive"] = True
                         c["hp"] = max(1, c["maxhp"] // 3)
@@ -4987,11 +6387,10 @@ def play_game(slot, saved):
             for y in range(max(0, y0), min(h, y1)):
                 for x in range(max(0, x0), min(w, x1)):
                     draw_tile(theme, x, y, grid[y][x], camx, cdy)
-            for y in range(max(0, y0 - 1), min(h, y1)):   # objetos 2x2 (encima)
+            for y in range(max(0, y0 - 1), min(h, y1)):   # pozas grandes: suelo, al fondo
                 for x in range(max(0, x0 - 1), min(w, x1)):
-                    k = grid[y][x]
-                    if k == 2 or k == 5:
-                        draw_big_decor(theme, x, y, k, camx, cdy)
+                    if grid[y][x] == 5:
+                        draw_big_decor(theme, x, y, 5, camx, cdy)
             # puertas del hub: marcador de color + CARTEL con la maga del mundo
             if loc == "hub":
                 for ex in rt["exits"]:
@@ -5027,32 +6426,77 @@ def play_game(slot, saved):
                         draw_throne_big(en["x"], en["y"], camx, cdy)
                     else:
                         draw_throne(en["x"], en["y"], camx, cdy)
-            # ACTORES ordenados por Y: el de más ABAJO se dibuja ENCIMA del de arriba
+            # ACTORES + ÁRBOLES ordenados por Y: el de más ABAJO se dibuja ENCIMA.
+            # El árbol se ordena por su TRONCO, así su copa tapa al jugador que pasa detrás.
             drawables = []
+            for ty in range(max(0, y0 - 1), min(h, y1)):
+                for tx in range(max(0, x0), min(w, x1)):
+                    if grid[ty][tx] == 2:
+                        drawables.append((ty + 1, (lambda xx=tx, yy=ty: draw_big_decor(
+                            theme, xx, yy, 2, camx, cdy))))
             for tk in talkers:
-                drawables.append((tk["y"], (lambda t=tk: draw_actor(
+                tkk = ("mago" if "Mago" in tk.get("name", "")
+                       else "maga" if "Maga" in tk.get("name", "") else None)
+                drawables.append((tk["y"], (lambda t=tk, k=tkk: draw_actor(
                     t["color"], t["x"], t["y"], bob, camx, cdy,
-                    wings=t.get("angel", False)))))
+                    kind=k, wings=t.get("angel", False)))))
+                if tk.get("quest"):          # "!" pendiente / "?" activa
+                    _q = quest_st.get(tk["quest"], {"st": 0})
+                    if _q.get("st", 0) < 2:
+                        _m = "!" if _q.get("st", 0) == 0 else "?"
+                        drawables.append((tk["y"] + 0.1, (lambda t=tk, m=_m:
+                            draw_text(screen, m,
+                                      int(t["x"] * TILE + TILE // 2 - camx) - 4,
+                                      int(t["y"] * TILE - 24 + bob - cdy),
+                                      font_md, GOLD))))
+                if tk.get("minigame"):       # "$" del mini-juego
+                    drawables.append((tk["y"] + 0.1, (lambda t=tk:
+                        draw_text(screen, "$",
+                                  int(t["x"] * TILE + TILE // 2 - camx) - 4,
+                                  int(t["y"] * TILE - 24 + bob - cdy),
+                                  font_md, (110, 220, 210)))))
             for en in enemies:
                 if not en["alive"]:
                     continue
-                if en.get("dragon"):               # el dragón es más grande (con alas)
-                    drawables.append((en["y"], (lambda e=en: draw_actor(
-                        e["color"], e["x"], e["y"], bob, camx, cdy,
-                        scale=2.2, wings=True))))
+                if en.get("dragon"):               # DRAGÓN DE TRES CABEZAS
+                    drawables.append((en["y"], (lambda e=en: (
+                        pygame.draw.ellipse(screen, (20, 20, 24), (
+                            int(e["x"] * TILE + TILE // 2 - camx) - 40,
+                            int(e["y"] * TILE + TILE - 4 - cdy) - 5, 80, 12)),
+                        draw_dragon3(e["color"],
+                                     int(e["x"] * TILE + TILE // 2 - camx),
+                                     int(e["y"] * TILE + TILE - 2 + bob - cdy) - 36,
+                                     34)))))
                 else:
-                    drawables.append((en["y"], (lambda e=en: draw_actor(
-                        e["color"], e["x"], e["y"], bob, camx, cdy))))
+                    # jefes con estilo: Negro/Blanco son MAGOS, las poseídas MAGAS
+                    ek = ("mago" if any(en.get(k) for k in
+                                        ("prologue", "subfinal", "final", "blanco1", "secret"))
+                          else "maga" if en.get("maga") else None)
+                    drawables.append((en["y"], (lambda e=en, k=ek: draw_actor(
+                        e["color"], e["x"], e["y"], bob, camx, cdy, kind=k))))
             comps = companions()
             for i in range(min(len(comps), len(comp_vis))):   # magas con glide suave
                 cvx, cvy = comp_vis[i]
-                drawables.append((cvy, (lambda c=comps[i], x=cvx, y=cvy: draw_actor(
-                    c["color"], x, y, bob, camx, cdy))))
+                ck = "mago" if comps[i].get("id") in ("negro", "blanco") else "maga"
+                drawables.append((cvy, (lambda c=comps[i], x=cvx, y=cvy, k=ck:
+                                        draw_actor(c["color"], x, y, bob, camx,
+                                                   cdy, kind=k))))
             drawables.append((vis_y, (lambda: draw_actor(
-                party[0]["color"], vis_x, vis_y, 0, camx, cdy, face=facing))))
+                party[0]["color"], vis_x, vis_y, 0, camx, cdy, face=facing,
+                kind="mago"))))
             drawables.sort(key=lambda d: d[0])     # menor Y (arriba) primero -> detrás
             for _, fn in drawables:
                 fn()
+
+            # PARTÍCULAS AMBIENTALES del mundo (brasas, hojas, copos...)
+            amb_cfg = AMBIENT_FX.get(rt["theme"])
+            if amb_cfg:
+                if amb_theme != rt["theme"]:
+                    amb_theme = rt["theme"]
+                    amb_parts = [amb_make(amb_cfg) for _ in range(amb_cfg["n"])]
+                amb_step_draw(amb_parts, amb_cfg["kind"], dt)
+            elif amb_parts:
+                amb_parts = []; amb_theme = None
 
             # HUD
             pygame.draw.rect(screen, (10, 12, 20), (0, 0, W, HUD_H))
@@ -5082,14 +6526,15 @@ def play_game(slot, saved):
             draw_text(screen, "E", ccx + 9, ccy - 6, font_xs, DIM)
             draw_text(screen, "O", ccx - 15, ccy - 6, font_xs, DIM)
             if chat.busy:
+                _wai = chat.who.get("ai") or {}
                 mm, ss = divmod(chat.elapsed(), 60)
                 dots = "." * (1 + (bob_t // 400) % 3)
-                msg = f"{chat.who['name']} [{chat.who['ai']['name']}] pensando{dots} ({mm:02d}:{ss:02d})"
+                msg = f"{chat.who['name']} [{_wai.get('name', 'IA')}] pensando{dots} ({mm:02d}:{ss:02d})"
                 if chat.timed_out():
                     msg = f"{chat.who['name']}: la IA tarda demasiado..."
                 cb = pygame.Rect(8, 26, W - 16, 22)
                 pygame.draw.rect(screen, (12, 14, 26), cb, border_radius=6)
-                pygame.draw.rect(screen, chat.who["ai"]["color"], cb, 1, border_radius=6)
+                pygame.draw.rect(screen, _wai.get("color", GOLD), cb, 1, border_radius=6)
                 draw_text(screen, msg, cb.x + 8, cb.y + 4, font_xs, (200, 220, 255))
             if state == "shop":
                 ent = shop_entries()
@@ -5237,8 +6682,16 @@ def play_game(slot, saved):
                     act = status_focus == "list"
                     draw_text(screen, "OBJETOS", rx, cy0 + 26, font_xs,
                               GOLD if act else DIM)
-                    for i, it in enumerate(ITEMS):
-                        yy = cy0 + 44 + i * 22
+                    _mv = max(4, (pn.bottom - 54 - (cy0 + 44)) // 22)
+                    _tp = _list_window(status_i % len(ITEMS), len(ITEMS), _mv)
+                    if _tp > 0:
+                        draw_text(screen, "▲", pn.right - 30, cy0 + 42, font_xs, GOLD)
+                    if _tp + _mv < len(ITEMS):
+                        draw_text(screen, "▼", pn.right - 30,
+                                  cy0 + 44 + (_mv - 1) * 22, font_xs, GOLD)
+                    for i in range(_tp, min(len(ITEMS), _tp + _mv)):
+                        it = ITEMS[i]
+                        yy = cy0 + 44 + (i - _tp) * 22
                         if i == status_i % len(ITEMS):
                             pygame.draw.rect(screen, (60, 70, 110) if act else (34, 38, 58),
                                              (rx - 4, yy - 2, rw, 20), border_radius=4)
@@ -5254,8 +6707,17 @@ def play_game(slot, saved):
                     opts = acc_options()
                     draw_text(screen, "ACCESORIOS", rx, cy0 + 26, font_xs,
                               GOLD if act else DIM)
-                    for i, (el, a) in enumerate(opts):
-                        yy = cy0 + 44 + i * 22
+                    _mv = max(4, (pn.bottom - 110 - (cy0 + 44)) // 22)
+                    _tp = _list_window(status_i % len(opts), len(opts), _mv)
+                    _vis = min(len(opts), _tp + _mv)
+                    if _tp > 0:
+                        draw_text(screen, "▲", pn.right - 30, cy0 + 42, font_xs, GOLD)
+                    if _vis < len(opts):
+                        draw_text(screen, "▼", pn.right - 30,
+                                  cy0 + 44 + (_vis - _tp - 1) * 22, font_xs, GOLD)
+                    for i in range(_tp, _vis):
+                        el, a = opts[i]
+                        yy = cy0 + 44 + (i - _tp) * 22
                         if i == status_i % len(opts):
                             pygame.draw.rect(screen, (60, 70, 110) if act else (34, 38, 58),
                                              (rx - 4, yy - 2, rw, 20), border_radius=4)
@@ -5269,7 +6731,7 @@ def play_game(slot, saved):
                         draw_text(screen, nm + eq, rx + 6, yy, font_sm, cc)
                     el, a = opts[status_i % len(opts)]      # descripción del resaltado
                     desc = acc_desc(el, a)
-                    dy = cy0 + 44 + len(opts) * 22 + 10
+                    dy = cy0 + 44 + (_vis - _tp) * 22 + 10
                     pygame.draw.rect(screen, (24, 26, 42), (rx - 4, dy, rw, 40),
                                      border_radius=4)
                     for j, ln in enumerate(wrap(desc, font_xs, rw - 12)):
@@ -5287,8 +6749,11 @@ def play_game(slot, saved):
                     if not lst:
                         draw_text(screen, "No tienes equipo. Compra en el Mercader.",
                                   pn.x + 16, cy0 + 52, font_sm, DIM)
-                    for i, (cat, j) in enumerate(lst):
-                        yy = cy0 + 52 + i * 20
+                    _mv = max(4, (pn.bottom - 52 - (cy0 + 52)) // 20)
+                    _tp = _list_window(status_i % len(lst), len(lst), _mv) if lst else 0
+                    for i in range(_tp, min(len(lst), _tp + _mv)):
+                        cat, j = lst[i]
+                        yy = cy0 + 52 + (i - _tp) * 20
                         if i == status_i % len(lst):
                             pygame.draw.rect(screen, (40, 50, 80),
                                              (pn.x + 10, yy - 2, 420, 18), border_radius=4)
@@ -5301,6 +6766,11 @@ def play_game(slot, saved):
                         draw_text(screen, f"{cat}: {obj['name']} "
                                   f"+{obj[EQUIP_STAT[cat]]}{nv}{mk}", pn.x + 20, yy,
                                   font_sm, col)
+                    if lst and _tp > 0:
+                        draw_text(screen, "▲", pn.right - 30, cy0 + 52, font_xs, GOLD)
+                    if lst and _tp + _mv < len(lst):
+                        draw_text(screen, "▼", pn.right - 30,
+                                  cy0 + 52 + (_mv - 1) * 20, font_xs, GOLD)
                     foot = "↑/↓ elegir | ENTER equipar/quitar"
                 elif tabname == "Grupo":
                     draw_text(screen, "Gestiona quién va en tu grupo (Gris + 2).",
@@ -5332,9 +6802,32 @@ def play_game(slot, saved):
         # fundido de ENTRADA de la transición (sobre cualquier estado)
         if fade_t > 0:
             fade_t = max(0, fade_t - dt)
-            ov = pygame.Surface((W, H)); ov.fill(BLACK)
-            ov.set_alpha(int(255 * fade_t / FADE_MS))
-            screen.blit(ov, (0, 0))
+            ft = fade_t / FADE_MS              # 1 -> 0 conforme entra la escena
+            if fade_mode == "iris":            # iris que se ABRE desde el centro
+                maxr = int(math.hypot(W, H) / 2) + 8
+                r = int(maxr * (1 - ft))
+                ov = pygame.Surface((W, H))
+                ov.set_colorkey((255, 0, 255))
+                ov.fill(BLACK)
+                if r > 0:
+                    pygame.draw.circle(ov, (255, 0, 255), (W // 2, H // 2), r)
+                screen.blit(ov, (0, 0))
+            elif fade_mode in ("wipe_r", "wipe_l"):   # cortina que se RETIRA
+                bw = W - int(W * (1 - ft))
+                if fade_mode == "wipe_r":      # revela de izquierda a derecha
+                    pygame.draw.rect(screen, BLACK, (W - bw, 0, bw, H))
+                else:                          # revela de derecha a izquierda
+                    pygame.draw.rect(screen, BLACK, (0, 0, bw, H))
+            elif fade_mode == "swirl":         # la escena GIRA hacia dentro
+                snap = screen.copy()
+                img = pygame.transform.rotozoom(
+                    snap, -50 * ft * ft, max(0.04, 1 - 0.96 * ft * ft))
+                screen.fill(BLACK)
+                screen.blit(img, img.get_rect(center=(W // 2, H // 2)))
+            else:                              # fundido clásico por alfa
+                ov = pygame.Surface((W, H)); ov.fill(BLACK)
+                ov.set_alpha(int(255 * ft))
+                screen.blit(ov, (0, 0))
 
         present()
 
