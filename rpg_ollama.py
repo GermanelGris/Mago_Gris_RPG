@@ -1,13 +1,12 @@
 """rpg.py - Nerea RPG (prototipo estilo Chrono Trigger: overworld + diálogos + combate por turnos)"""
 
 GAME_META = {
-    "name":  "Nerea RPG Ollama",
+    "name":  "Nerea RPG",
     "desc":  "RPG 2D por turnos. Elige hasta 3 héroes, explora, habla con NPCs y combate.",
     "ctrl":  "Flechas/WASD: mover | E/Enter: hablar/avanzar | ESC: salir",
     "color": (120, 80, 200),
     "order": 20,
 }
-
 
 import pygame
 import sys
@@ -4289,6 +4288,41 @@ ENDING_FX = {
 }
 
 
+def _ihalo(x, y, r, col, a=80):
+    """Halo/glow suave aditivo centrado en (x, y)."""
+    r = int(r)
+    if r < 1:
+        return
+    surf = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
+    for i in range(6, 0, -1):
+        rr = max(1, int(r * i / 6))
+        pygame.draw.circle(surf, (col[0], col[1], col[2], max(1, a // 6)), (r, r), rr)
+    screen.blit(surf, (int(x - r), int(y - r)), special_flags=pygame.BLEND_RGBA_ADD)
+
+
+def _tri_fill(p1, p2, p3, fill, edge, ew=2):
+    """Triángulo relleno con borde (anti-aliased si hay gfxdraw)."""
+    pts = [(int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1])), (int(p3[0]), int(p3[1]))]
+    try:
+        import pygame.gfxdraw as _gfx
+        _gfx.filled_trigon(screen, pts[0][0], pts[0][1], pts[1][0], pts[1][1],
+                           pts[2][0], pts[2][1], fill)
+        _gfx.aatrigon(screen, pts[0][0], pts[0][1], pts[1][0], pts[1][1],
+                      pts[2][0], pts[2][1], edge)
+    except Exception:
+        pygame.draw.polygon(screen, fill, pts)
+    if ew:
+        pygame.draw.polygon(screen, edge, pts, ew)
+
+
+def _cloak(x, y):
+    """Silueta encapuchada (el Mago Oscuro recorriendo los reinos)."""
+    dark = (36, 26, 50)
+    pygame.draw.polygon(screen, dark, [(x, y - 26), (x - 15, y + 20), (x + 15, y + 20)])
+    pygame.draw.circle(screen, dark, (x, y - 22), 9)
+    pygame.draw.circle(screen, (10, 8, 16), (x, y - 22), 7)
+
+
 def _draw_shot(motif, t, fade, cx, cy, cols):
     """Dibuja UNA toma (animación) del final. Cada toma se ve distinta."""
     ang = t / 600.0
@@ -4358,70 +4392,82 @@ def _draw_shot(motif, t, fade, cx, cy, cols):
         pygame.draw.polygon(screen, (110, 90, 140),
                             [(cx, cy - sz // 3), (cx - h, cy + (2 * sz) // 3),
                              (cx + h, cy + (2 * sz) // 3)], 2)
-    elif motif == "bros":                       # los DOS HERMANOS en equilibrio
-        pygame.draw.circle(screen, (26, 24, 40), (cx, cy), 92)
-        sw = 6 * math.sin(t / 500.0)
-        s = 32
-        lx, rx = cx - 54, cx + 54
-        pygame.draw.line(screen, (110, 110, 130), (lx, cy), (rx, cy), 1)
-        pygame.draw.polygon(screen, (238, 238, 244),          # Blanco: apice arriba
-                            [(lx, cy - s + sw), (lx - s, cy + s + sw),
-                             (lx + s, cy + s + sw)], 3)
-        pygame.draw.polygon(screen, (152, 132, 192),          # Negro: apice abajo
-                            [(rx, cy + s - sw), (rx - s, cy - s - sw),
-                             (rx + s, cy - s - sw)], 3)
-    elif motif == "council":                    # el CONSEJO DEL COLOR
-        s = 19
-        pygame.draw.polygon(screen, (238, 238, 244),
-                            [(cx, cy - s), (cx - s, cy + s), (cx + s, cy + s)], 2)
-        pygame.draw.polygon(screen, (152, 132, 192),
-                            [(cx, cy + s), (cx - s, cy - s), (cx + s, cy - s)], 2)
+    elif motif == "council":                    # equilibrio: triángulo DENTRO de triángulo + 6 colores
+        _ihalo(cx, cy, 104, (48, 46, 82), 60)
+        s = 30
+        _tri_fill((cx, cy - s), (cx - s, cy + s), (cx + s, cy + s),
+                  (86, 72, 128), (182, 162, 220), 2)          # exterior (ápice arriba)
+        h = s // 2
+        _tri_fill((cx, cy - s // 3), (cx - h, cy + (2 * s) // 3),
+                  (cx + h, cy + (2 * s) // 3),
+                  (224, 224, 236), (255, 255, 255), 2)         # interior (MISMO sentido)
         for k, cc in enumerate(_SIX_COLS):
             a = ang * 0.5 + k * (2 * math.pi / 6)
-            rr = 84 + 8 * math.sin(t / 380.0 + k)
-            pygame.draw.circle(screen, cc,
-                               (cx + int(rr * math.cos(a)),
-                                cy + int(rr * math.sin(a))), 13)
-    elif motif == "strings":                    # el TITIRITERO: hilos de luz
-        hx, hy = cx, cy - 88                                  # la mano de luz
-        pygame.draw.circle(screen, (255, 250, 210), (hx, hy), 15)
-        pygame.draw.circle(screen, (255, 255, 255), (hx, hy), 15, 2)
-        sway = int(math.sin(t / 420.0) * 15)
-        px, py = cx + sway, cy + 46                           # el titere (hermano)
-        for dx in (-24, 0, 24):
-            pygame.draw.line(screen, (236, 230, 255),
-                             (hx, hy + 12), (px + dx, py - 24), 1)
-        pygame.draw.circle(screen, (58, 40, 88), (px, py), 25)
-        pygame.draw.circle(screen, (152, 132, 192), (px, py), 25, 2)
-        for ex in (-9, 9):                                    # grita, no rie
-            pygame.draw.circle(screen, (228, 60, 60), (px + ex, py - 6), 3)
-    elif motif == "chains":                     # las SEIS MAGAS encerradas
+            rr = 92 + 8 * math.sin(t / 380.0 + k)
+            ox = cx + int(rr * math.cos(a)); oy = cy + int(rr * math.sin(a))
+            _ihalo(ox, oy, 22, cc, 95)
+            pygame.draw.circle(screen, cc, (ox, oy), 12)
+            pygame.draw.circle(screen, (250, 250, 255), (ox, oy), 12, 2)
+    elif motif == "decree":                     # decretos y reuniones a puerta cerrada
+        sc = pygame.Rect(cx - 96, cy - 58, 192, 116)
+        pygame.draw.rect(screen, (18, 16, 12), sc.move(5, 6), border_radius=8)
+        pygame.draw.rect(screen, (222, 214, 190), sc, border_radius=8)
+        pygame.draw.rect(screen, (150, 138, 110), sc, 2, border_radius=8)
+        for j in range(4):
+            wln = 150 - (j % 2) * 40
+            pygame.draw.line(screen, (70, 62, 52), (sc.x + 20, sc.y + 22 + j * 18),
+                             (sc.x + 20 + wln, sc.y + 22 + j * 18), 2)
+        pul = 0.5 + 0.5 * math.sin(t / 300.0)
+        sx, sy = sc.centerx, sc.bottom - 8
+        _ihalo(sx, sy, 24 + int(8 * pul), (150, 60, 190), 110)   # sello siniestro, late
+        pygame.draw.circle(screen, (34, 20, 48), (sx, sy), 16)
+        pygame.draw.circle(screen, (150, 110, 200), (sx, sy), 16, 2)
+    elif motif == "realms":                     # recorre los SEIS reinos; la sombra avanza
+        prog = fade
+        for k, cc in enumerate(_SIX_COLS):
+            bx = cx - 150 + k * 60
+            arc = pygame.Rect(bx - 20, cy - 24, 40, 64)
+            fallen = (k + 0.5) / 6.0 <= prog
+            pygame.draw.rect(screen, (60, 52, 74) if fallen else cc, arc, border_radius=14)
+            pygame.draw.rect(screen, (30, 26, 40) if fallen else (250, 250, 255),
+                             arc, 2, border_radius=14)
+            if not fallen:
+                _ihalo(bx, cy + 6, 20, cc, 80)
+        fx = cx - 150 + int(prog * 6) * 60
+        _ihalo(fx, cy + 20, 26, (120, 40, 160), 90)
+        _cloak(fx, cy + 18)
+    elif motif == "blight":                     # la oscuridad del TERROR devora la luz
+        pul = 0.5 + 0.5 * math.sin(t / 260.0)
+        R = int(40 + fade * 46)
+        for k in range(14):
+            a = ang * 0.5 + k * (2 * math.pi / 14)
+            L = R + 22 + int(14 * pul)
+            pygame.draw.line(screen, (58, 26, 78),
+                             (cx + int(R * math.cos(a)), cy + int(R * math.sin(a))),
+                             (cx + int(L * math.cos(a)), cy + int(L * math.sin(a))), 3)
+        core = tuple(int(v * (1 - 0.7 * fade)) for v in _SIX_COLS[0])
+        _ihalo(cx, cy, R + 20, (80, 20, 110), 90)
+        pygame.draw.circle(screen, core, (cx, cy), R)
+        pygame.draw.circle(screen, (30, 16, 44), (cx, cy), int(R * fade))
+        for ex in (-14, 14):
+            pygame.draw.circle(screen, (240, 70, 70), (cx + ex, cy - 4), 4)   # ojos del terror
+    elif motif == "chains":                     # las seis reinas enmudecen
+        _ihalo(cx, cy, 80, (30, 24, 46), 70)
         for k, cc in enumerate(_SIX_COLS):
             a = k * (2 * math.pi / 6) + ang * 0.15
-            rr = 56 + fade * 64
-            ox, oy = cx + int(rr * math.cos(a)), cy + int(rr * math.sin(a))
-            for j in (1, 2, 3):                               # eslabones
-                pygame.draw.circle(screen, (104, 96, 126),
-                                   (cx + int(rr * j / 4.0 * math.cos(a)),
-                                    cy + int(rr * j / 4.0 * math.sin(a))), 3, 1)
-            pygame.draw.circle(screen,
-                               tuple(int(v * (1.0 - 0.6 * fade)) for v in cc),
-                               (ox, oy), 13)
-        pygame.draw.circle(screen, (28, 22, 42), (cx, cy), 26)
-    elif motif == "quill":                      # la PROFECIA falsa, tinta fresca
-        sc = pygame.Rect(cx - 116, cy - 44, 232, 88)
-        pygame.draw.rect(screen, (238, 232, 210), sc, border_radius=6)
-        pygame.draw.rect(screen, (188, 172, 138), sc, 2, border_radius=6)
-        n = int(min(1.0, t / 1700.0) * 192)                   # la tinta AVANZA
-        for j in (0, 1, 2):
-            wln = max(0, min(n - j * 38, 192 - j * 26))
-            if wln > 0:
-                pygame.draw.line(screen, (42, 34, 30),
-                                 (sc.x + 20, sc.y + 26 + j * 20),
-                                 (sc.x + 20 + wln, sc.y + 26 + j * 20), 2)
-        qx = sc.x + 20 + min(192, n)                          # la pluma
-        pygame.draw.line(screen, (250, 250, 255), (qx, sc.y + 22), (qx + 15, sc.y - 22), 3)
-        pygame.draw.circle(screen, (255, 250, 210), (qx + 15, sc.y - 22), 4)
+            rr = 58 + fade * 66
+            ox = cx + int(rr * math.cos(a)); oy = cy + int(rr * math.sin(a))
+            for j in (1, 2, 3):
+                lx = cx + int(rr * j / 4.0 * math.cos(a))
+                ly = cy + int(rr * j / 4.0 * math.sin(a))
+                pygame.draw.circle(screen, (122, 114, 144), (lx, ly), 4, 1)
+            if fade < 0.6:
+                _ihalo(ox, oy, 20, cc, int(90 * (1 - fade)))
+            dim = tuple(int(v * (1 - 0.62 * fade)) for v in cc)
+            pygame.draw.circle(screen, dim, (ox, oy), 13)
+            pygame.draw.circle(screen, (206, 206, 216), (ox, oy), 13, 1)
+        pygame.draw.circle(screen, (26, 20, 40), (cx, cy), 28)
+        pygame.draw.circle(screen, (120, 100, 150), (cx, cy), 28, 2)
     elif motif == "throne":                     # trono dorado coronado de luz
         cray = cols[1] if len(cols) > 1 else c0
         for k in range(14):
@@ -4481,71 +4527,149 @@ def ending_cinematic(ekey):
 
 
 # ============================================================
-#  INTRO ANIMADA (apertura): el origen del Orden y el engano del Blanco
+#  INTRO ANIMADA (apertura): la leyenda que el mundo cree (con su misterio)
 # ============================================================
-INTRO_TITLE = "EL ORDEN DE LOS DOS TRIANGULOS"
-INTRO_COLS = [(238, 238, 244), (152, 132, 192), (255, 240, 160)]
+INTRO_TITLE = "PRÓLOGO · LA SOMBRA DE LOS SEIS REINOS"
+INTRO_COLS = [(190, 178, 220), (120, 120, 132), (150, 90, 190)]
 INTRO_SHOTS = [
-    ("bros", "Al principio, los Dos Triángulos eran HERMANOS: el Blanco, luz del "
-             "día; el Negro, la sombra que trae el descanso. Ninguno reinaba solo."),
-    ("council", "Con ellos se sentaban seis magas —el Consejo del Color— y el "
-                "mundo tenía todos sus colores."),
-    ("strings", "Pero el Blanco quiso TODA la fe del mundo. Y la luz no puede "
-                "conquistar sin dejar de ser luz... así que fabricó un villano: "
-                "poseyó a su propio hermano."),
-    ("chains", "Con las manos del Negro encerró a las seis magas, las únicas que "
-               "veían sus hilos. El color se apagó y el miedo llenó los templos."),
-    ("quill", "Después escribió una profecía: «un mago sin color romperá el "
-              "sello». La tinta aún estaba fresca."),
-    ("gray", "Y así, viajero gris, el mundo entero reza por tu victoria... "
-             "también quien te envía. Ninguno sabe para qué."),
+    ("council", "Durante mil años, los Dos Triángulos y las seis magas del Consejo "
+                "del Color sostuvieron el equilibrio. El mundo tenía todos sus colores."),
+    ("decree", "Entonces algo cambió en el Mago Oscuro. Empezó a dictar extraños "
+               "decretos y a convocar reuniones a puerta cerrada, un reino tras otro."),
+    ("realms", "Uno a uno recorrió los seis reinos de color. Nadie oyó lo que se dijo "
+               "tras esas puertas... solo que el Oscuro salía más callado. Y más pálido."),
+    ("blight", "A su paso, la luz se apagaba. Y no era la sombra amable del descanso, "
+               "la que te devuelve a ti mismo: era una oscuridad de puro terror."),
+    ("chains", "Una tras otra, las seis reinas se hundieron en esa sombra y "
+               "enmudecieron. Sus pueblos despertaron a un mundo sin voz."),
+    ("gray", "Solo queda una vieja profecía: un mago SIN color romperá el sello. "
+             "Dicen que ya camina entre los reinos. ¿Serás tú, viajero gris?"),
 ]
+
+_INTRO_SND = None
+
+
+def _intro_song():
+    """Sintetiza un tema atmosférico en tono menor (misterio) para la intro. Loop."""
+    mix = pygame.mixer.get_init()
+    if not mix:
+        return None
+    rate, _fmt, chans = mix
+
+    def hz(semi):
+        return 55.0 * (2 ** (semi / 12.0))
+    prog = [(0, [0, 3, 7, 10]), (-4, [0, 3, 7, 12]),      # Am7 -> Fmaj7
+            (5, [0, 3, 7, 10]), (-2, [0, 4, 7, 10])]      # Dm7 -> G7  (progresión de misterio)
+    beat = 0.52
+    buf = _array.array("h")
+    for root, chord in prog:
+        for step in range(4):
+            note = chord[step % len(chord)]
+            fmel, fbass = hz(24 + root + note), hz(root)
+            n = int(rate * beat)
+            for i in range(n):
+                tt = i / n
+                em = math.sin(math.pi * tt) ** 0.55          # campana por nota
+                eb = 0.85 * (1 - 0.25 * tt)
+                ph = i / rate
+                sig = (0.30 * em * math.sin(2 * math.pi * fmel * ph)
+                       + 0.20 * eb * math.sin(2 * math.pi * fbass * ph)
+                       + 0.08 * em * math.sin(2 * math.pi * fmel * 2 * ph))
+                v = int(max(-1.0, min(1.0, sig)) * 21000)
+                for _ in range(chans):
+                    buf.append(v)
+    try:
+        return pygame.mixer.Sound(buffer=buf.tobytes())
+    except Exception:
+        return None
+
+
+def _intro_music(on):
+    """Enciende/apaga el tema propio de la intro (canal aparte; no toca los mp3)."""
+    global _INTRO_SND
+    if on:
+        if not OPTS.get("sound", True):
+            return
+        try:
+            play_music(None)                 # calla la música del menú
+        except Exception:
+            pass
+        if _INTRO_SND is None:
+            _INTRO_SND = _intro_song()       # se sintetiza una sola vez
+        if _INTRO_SND:
+            _INTRO_SND.set_volume(0.4)
+            _INTRO_SND.play(loops=-1)
+    elif _INTRO_SND:
+        _INTRO_SND.fadeout(400)
+
+
+def _intro_bg(stars, t):
+    """Fondo de la intro: degradado vertical + campo de estrellas titilando."""
+    top, bot = (12, 11, 26), (3, 3, 9)
+    band = 24
+    for y in range(0, H, band):
+        f = y / max(1, H)
+        pygame.draw.rect(screen, (int(top[0] + (bot[0] - top[0]) * f),
+                                  int(top[1] + (bot[1] - top[1]) * f),
+                                  int(top[2] + (bot[2] - top[2]) * f)),
+                         (0, y, W, band))
+    for sx, sy, sr, ph in stars:
+        tw = 0.5 + 0.5 * math.sin(t / 600.0 + ph)
+        c = int(55 + 130 * tw)
+        pygame.draw.circle(screen, (c, c, min(255, c + 25)), (sx, sy), sr)
 
 
 def intro_cinematic():
-    """Cinemática de apertura. [Enter] avanza de toma, [ESC] o B la salta."""
+    """Cinemática de apertura (misteriosa). [Enter] avanza · [ESC]/B la salta."""
     si, t = 0, 0
     cx, cy = W // 2, H // 2 - 28
-    while True:
-        dt = clock.tick(FPS)
-        t += dt
-        adv = False
-        for e in pygame.event.get():
-            if e.type == pygame.QUIT:
-                pygame.quit(); sys.exit()
-            if e.type == pygame.KEYDOWN and e.key == pygame.K_F11:
-                toggle_fullscreen(); continue
-            if (e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE) or \
-               (e.type == pygame.JOYBUTTONDOWN and e.button in (1, 6)):
-                return                                  # SALTAR la intro
-            if (e.type == pygame.KEYDOWN and e.key in
-                    (pygame.K_e, pygame.K_RETURN, pygame.K_SPACE)) or \
-               (e.type == pygame.JOYBUTTONDOWN and e.button in (0, 7)):
-                adv = True
-        if adv and t > 500:
-            si += 1
-            if si >= len(INTRO_SHOTS):
-                return
-            t = 0
-        motif, text = INTRO_SHOTS[si]
-        fade = min(1.0, t / 900.0)
-        screen.fill((6, 6, 14))
-        _draw_shot(motif, t, fade, cx, cy, INTRO_COLS)
-        ts = font_lg.render(INTRO_TITLE, True, GOLD)
-        screen.blit(ts, (cx - ts.get_width() // 2, 24))
-        by = H - 96
-        pygame.draw.rect(screen, (12, 12, 22), (24, by, W - 48, 70), border_radius=6)
-        pygame.draw.rect(screen, (90, 90, 130), (24, by, W - 48, 70), 1, border_radius=6)
-        for j, ln in enumerate(wrap(text, font_sm, W - 84)):
-            screen.blit(font_sm.render(ln, True, WHITE), (40, by + 12 + j * 18))
-        last = si == len(INTRO_SHOTS) - 1
-        draw_text(screen, ("[Enter] comenzar" if last else "[Enter] seguir")
-                  + f"  ({si + 1}/{len(INTRO_SHOTS)})   [ESC] saltar",
-                  W - 320, H - 20, font_sm, DIM)
-        if fade < 1.0:
-            veil = pygame.Surface((W, H)); veil.fill((0, 0, 0))
-            veil.set_alpha(int((1 - fade) * 200)); screen.blit(veil, (0, 0))
-        present()
+    _rng = random.Random(1234)
+    stars = [(_rng.randint(0, W), _rng.randint(0, H), _rng.choice((1, 1, 2)),
+              _rng.uniform(0, 6.283)) for _ in range(120)]
+    _intro_music(True)
+    try:
+        while True:
+            dt = clock.tick(FPS)
+            t += dt
+            adv = False
+            for e in pygame.event.get():
+                if e.type == pygame.QUIT:
+                    pygame.quit(); sys.exit()
+                if e.type == pygame.KEYDOWN and e.key == pygame.K_F11:
+                    toggle_fullscreen(); continue
+                if (e.type == pygame.KEYDOWN and e.key == pygame.K_ESCAPE) or \
+                   (e.type == pygame.JOYBUTTONDOWN and e.button in (1, 6)):
+                    return
+                if (e.type == pygame.KEYDOWN and e.key in
+                        (pygame.K_e, pygame.K_RETURN, pygame.K_SPACE)) or \
+                   (e.type == pygame.JOYBUTTONDOWN and e.button in (0, 7)):
+                    adv = True
+            if adv and t > 500:
+                si += 1
+                if si >= len(INTRO_SHOTS):
+                    return
+                t = 0
+            motif, text = INTRO_SHOTS[si]
+            fade = min(1.0, t / 1100.0)
+            _intro_bg(stars, t)
+            _draw_shot(motif, t, fade, cx, cy, INTRO_COLS)
+            ts = font_lg.render(INTRO_TITLE, True, GOLD)
+            screen.blit(ts, (cx - ts.get_width() // 2, 22))
+            by = H - 96
+            pygame.draw.rect(screen, (12, 12, 22), (24, by, W - 48, 70), border_radius=6)
+            pygame.draw.rect(screen, (90, 90, 130), (24, by, W - 48, 70), 1, border_radius=6)
+            for j, ln in enumerate(wrap(text, font_sm, W - 84)):
+                screen.blit(font_sm.render(ln, True, WHITE), (40, by + 12 + j * 18))
+            last = si == len(INTRO_SHOTS) - 1
+            draw_text(screen, ("[Enter] comenzar" if last else "[Enter] seguir")
+                      + f"  ({si + 1}/{len(INTRO_SHOTS)})   [ESC] saltar",
+                      W - 320, H - 20, font_sm, DIM)
+            if fade < 1.0:
+                veil = pygame.Surface((W, H)); veil.fill((0, 0, 0))
+                veil.set_alpha(int((1 - fade) * 200)); screen.blit(veil, (0, 0))
+            present()
+    finally:
+        _intro_music(False)
 
 
 # ============================================================
