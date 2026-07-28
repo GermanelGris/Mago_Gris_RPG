@@ -1,7 +1,7 @@
 """rpg.py - Nerea RPG (prototipo estilo Chrono Trigger: overworld + diálogos + combate por turnos)"""
 
 GAME_META = {
-    "name":  "Nerea RPG",
+    "name":  "Nerea RPG ollama",
     "desc":  "RPG 2D por turnos. Elige hasta 3 héroes, explora, habla con NPCs y combate.",
     "ctrl":  "Flechas/WASD: mover | E/Enter: hablar/avanzar | ESC: salir",
     "color": (120, 80, 200),
@@ -4423,7 +4423,7 @@ def _draw_shot(motif, t, fade, cx, cy, cols):
         pygame.draw.circle(screen, (34, 20, 48), (sx, sy), 16)
         pygame.draw.circle(screen, (150, 110, 200), (sx, sy), 16, 2)
     elif motif == "realms":                     # recorre los SEIS reinos; la sombra avanza
-        prog = fade
+        prog = min(1.0, t / 3200.0)             # escena 3: la sombra avanza MÁS LENTO
         for k, cc in enumerate(_SIX_COLS):
             bx = cx - 150 + k * 60
             arc = pygame.Rect(bx - 20, cy - 24, 40, 64)
