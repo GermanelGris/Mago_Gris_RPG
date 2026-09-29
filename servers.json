@@ -1,0 +1,18 @@
+{
+  "_ayuda": "Pon la API key en apikeys.txt. models [] = TODOS los modelos del proveedor; o lista solo los que quieras.",
+  "openai": {
+    "models": []
+  },
+  "groq": {
+    "models": []
+  },
+  "nvidia": {
+    "models": []
+  },
+  "anthropic": {
+    "models": []
+  },
+  "google": {
+    "models": []
+  }
+}
